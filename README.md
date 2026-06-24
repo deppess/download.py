@@ -1,63 +1,105 @@
 # download.py
 
-Downloads, cleans, tags, and sorts music from YouTube into genre folders. Built around yt-dlp, Last.fm, and LRCLIB.
+YouTube music sync pipeline for Linux — downloads with yt-dlp, crops cover art, cleans filenames, tags genres with Last.fm, fetches synced LRCLIB lyrics, and sorts `.m4a` files into genre folders.
 
 ## Dependencies
 
-```
-yt-dlp  python-pylast  python-mutagen  python-pillow
+```bash
+yt-dlp  ffmpeg  python-pylast  python-mutagen  python-pillow
+libnotify   # desktop error notifications via notify-send / mako
 ```
 
-## Setup
+Arch:
 
-Edit the constants at the top of `download.py`:
+```bash
+sudo pacman -S yt-dlp ffmpeg python-pylast python-mutagen python-pillow libnotify
+```
+
+## Install
+
+```bash
+chmod +x download.py
+cp download.py ~/.local/bin/download
+```
+
+Make sure `~/.local/bin` is in your `PATH`.
+
+## Config
+
+Main paths and playlist settings live at the top of `download.py`:
 
 ```python
-MUSIC_DIR        = Path("/path/to/your/music")
-_BROWSER         = "firefox"
-_BROWSER_PROFILE = "/path/to/profile"
+MUSIC_DIR     = Path("/home/deppes/Media/music")
+LANDING_DIR   = MUSIC_DIR / "playlists" / "000-Landing"
+PLAYLISTS_DIR = MUSIC_DIR / "playlists"
+LYRICS_DIR    = MUSIC_DIR / "lyrics"
+ARCHIVE_FILE  = MUSIC_DIR / ".downloaded.txt"
+FAILED_FILE   = MUSIC_DIR / ".failed.txt"
+
+DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
+COOKIE_BROWSER = "chromium:Profile 1"
 ```
 
-Create `~/.config/genre-tagger.cfg` with your [Last.fm API key](https://www.last.fm/api/account/create):
+Last.fm genre tagging requires `~/.config/genre-tagger.cfg`:
 
 ```ini
 [lastfm]
-api_key = YOUR_KEY
+api_key = YOUR_LASTFM_API_KEY
 ```
 
-## Usage
+## Commands
 
+```bash
+download playlist                  sync the hardcoded playlist: The Mix
+download <url>                     download another YouTube URL
+download --process <dir>           process existing `.m4a` files only
+download --process <dir> --dry-run preview changes without writing files
 ```
-download <url>                       download + full pipeline
-download --process <dir>             skip download, process existing files
-download --process <dir> --dry-run   preview only
 
---skip-crop      skip cover art cropping
+```bash
+--skip-crop      skip embedded cover crop
 --skip-tag       skip Last.fm genre tagging
---skip-lyrics    skip LRCLIB lyrics fetch
---skip-sort      skip moving files into genre folders
---force          re-tag files that already have a genre
---verbose        show raw Last.fm tags and scores per file
+--skip-lyrics    skip LRCLIB lyric fetch
+--skip-sort      skip moving files into folders
+--force          re-tag files that already have a valid genre
+--verbose        show Last.fm tags and scoring
+--no-cookies     run yt-dlp without Chromium cookies
 ```
+
+Bare `download` intentionally fails instead of syncing the playlist by accident.
 
 ## Pipeline
 
-```
-yt-dlp → 000-Landing/
+```text
+yt-dlp → playlists/000-Landing/
   crop embedded cover art to 1:1
   strip playlist index prefix + "- Topic" from filenames
-  Last.fm lookup → genre tag → write to file metadata
-  LRCLIB → save .lrc alongside music
+  Last.fm lookup → write genre metadata
+  LRCLIB lookup → save synced `.lrc` files
   move into playlists/{Genre}/
 ```
 
-**Genre buckets:** Hip Hop · Rock & Metal · Soul · Electronic · Oldies · Misc
+Genre buckets:
 
-**Tag fallback chain** (stops at first hit):
-track lookup → artist lookup → raw artist → search → channel name cleanup → title parsing → keyword scan → Misc
+```text
+Hip Hop · Rock & Metal · Soul · Electronic · Oldies · Misc
+```
 
-Files that fail every step get tagged `Misc` for manual review.
+Collection overrides route matching filenames into fixed soundtrack folders, such as Initial D, Jet Set Radio, and Bomb Rush Cyberfunk. Edit `COLLECTIONS` in the script to add more.
 
-**Collections** — filenames matching certain keywords get routed to a fixed subfolder regardless of genre. Edit `COLLECTIONS` at the top of the script to add your own.
+## State Files
 
-Ctrl+C finishes the current file then exits cleanly.
+```text
+.downloaded.txt  yt-dlp success archive; managed by yt-dlp
+.failed.txt      permanent unavailable-video skip list; managed by download.py
+```
+
+`.failed.txt` is updated live when yt-dlp reports a permanent unavailable YouTube ID. Future runs skip those IDs by default while leaving `.downloaded.txt` untouched.
+
+## YouTube Handling
+
+`download playlist` runs a quick preflight check before the full sync. It uses Chromium cookies from `COOKIE_BROWSER`, keeps yt-dlp's normal archive behavior, streams yt-dlp output live, suppresses failed-ID filter noise, and sends a desktop notification only for full-stop failures such as cookie/auth/rate-limit problems.
+
+## License
+
+MIT

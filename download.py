@@ -11,7 +11,8 @@ Pipeline (all steps run by default):
   6. Sort        Move files into genre/collection folders
 
 Usage:
-    download <url>                       Full pipeline
+    download playlist                    Sync the hardcoded main playlist
+    download <url>                       Full pipeline for another URL
     download --process <dir>             Process existing files (no download)
     download --process <dir> --dry-run   Preview changes
 
@@ -22,6 +23,11 @@ Usage:
     --dry-run      Preview all changes without modifying files
     --verbose      Show Last.fm tag details per file
     --force        Re-tag files that already have a valid genre
+    --no-cookies   Do not pass Chromium cookies to yt-dlp
+
+Notes:
+    .downloaded.txt remains yt-dlp's normal success archive.
+    .failed.txt is a separate live skip-list for permanently unavailable YouTube IDs.
 """
 
 import sys
@@ -31,6 +37,8 @@ import re
 import signal
 import subprocess
 import argparse
+import shutil
+import shlex
 import configparser
 import urllib.request
 import urllib.parse
@@ -60,16 +68,26 @@ except ImportError:
 
 # ── Config ───────────────────────────────────────────────────────────────
 
-MUSIC_DIR     = Path("/path/to/your/music")
+MUSIC_DIR     = Path("/home/deppes/Media/music")
 LANDING_DIR   = MUSIC_DIR / "playlists" / "000-Landing"
 PLAYLISTS_DIR = MUSIC_DIR / "playlists"
 LYRICS_DIR    = MUSIC_DIR / "lyrics"
 ARCHIVE_FILE  = MUSIC_DIR / ".downloaded.txt"
+FAILED_FILE   = MUSIC_DIR / ".failed.txt"
 CONFIG_FILE   = Path.home() / ".config" / "genre-tagger.cfg"
 LOG_DIR       = MUSIC_DIR
 
-_BROWSER         = "firefox"           # browser to pull cookies from
-_BROWSER_PROFILE = "/path/to/profile"  # browser profile dir (or "" to use default)
+# Main library playlist. Bare `download` intentionally does not use this; run `download playlist`.
+DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
+
+# yt-dlp cookie source verified from: ~/.config/chromium/Profile 1/Cookies
+COOKIE_BROWSER = "chromium:Profile 1"
+
+# Fast preflight target for the hardcoded playlist path.
+PREFLIGHT_VIDEO_URL = "https://www.youtube.com/watch?v=Yr8AD0T8YXY"
+
+# Desktop notification command. Mako receives notify-send notifications.
+NOTIFY_APP = "download"
 
 # ── Collections (keyword → sort folder override) ──────────────────────────
 
@@ -600,57 +618,301 @@ def get_collection(fname):
             return info["folder"], info["genre"]
     return None, None
 
+
+# ── yt-dlp guardrails ─────────────────────────────────────────────────────
+
+_YT_ID_RE = re.compile(r'\[youtube\]\s+([A-Za-z0-9_-]{11}):')
+_YT_ID_ONLY_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+
+# Only these are treated as permanent dead/unavailable videos and written to .failed.txt.
+_PERMANENT_FAILURE_PHRASES = (
+    "video unavailable. this video is not available",
+    "this video is private",
+    "private video",
+    "this video has been removed",
+    "this video is no longer available",
+    "video unavailable. this video has been removed",
+)
+
+# These mean the whole run is likely unhealthy: cookies/session/rate-limit/etc.
+_FATAL_STOP_PHRASES = (
+    "sign in to confirm you're not a bot",
+    "use --cookies-from-browser or --cookies",
+    "http error 429",
+    "too many requests",
+    "this content isn't available, try again later",
+    "unable to extract cookies",
+    "could not decrypt",
+    "failed to decrypt",
+    "database is locked",
+    "account has been restricted",
+)
+
+_SUPPRESSED_OUTPUT_PHRASES = (
+    "does not pass filter",
+)
+
+_BASE_MATCH_FILTERS = ("!is_live", "!live")
+
+_YTDLP_DOWNLOAD_ARGS = [
+    # Audio-only path. Prefer native m4a when available; otherwise extract/convert.
+    "--format",               "bestaudio[ext=m4a]/bestaudio/best",
+    "--extract-audio",
+    "--audio-format",         "m4a",
+    "--audio-quality",        "0",
+
+    # Metadata/artwork only. Subtitles are intentionally skipped for music.
+    "--embed-thumbnail",
+    "--convert-thumbnails",   "jpg",
+    "--embed-metadata",
+
+    # yt-dlp owns .downloaded.txt exactly like before.
+    "--download-archive",     str(ARCHIVE_FILE),
+    "--output",               str(LANDING_DIR / "%(uploader)s - %(title)s.%(ext)s"),
+    "--ignore-errors",
+    "--no-abort-on-error",
+    "--continue",
+    "--no-overwrites",
+    "--lazy-playlist",
+
+    # Gentle playlist behavior.
+    "--sleep-requests",       "1.25",
+    "--sleep-interval",       "8",
+    "--max-sleep-interval",   "18",
+    "--rate-limit",           "1.5M",
+    "--throttled-rate",       "100K",
+    "--concurrent-fragments", "1",
+
+    # Finite retries with backoff instead of infinite retry loops.
+    "--retries",              "10",
+    "--fragment-retries",     "10",
+    "--extractor-retries",    "5",
+    "--retry-sleep",          "http:exp=5:60",
+    "--retry-sleep",          "fragment:exp=5:60",
+    "--retry-sleep",          "extractor:linear=10:60:10",
+
+    "--parse-metadata",       "%(uploader)s:%(meta_artist)s",
+    "--parse-metadata",       "%(title)s:%(meta_title)s",
+    "--replace-in-metadata",  "uploader", " - Topic$", "",
+    "--check-formats",
+]
+
+
+def notify_full_stop(title, body):
+    """Send a desktop notification for full-stop failures only."""
+    if not shutil.which("notify-send"):
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "-a", NOTIFY_APP, "-u", "critical", title, body],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
+
+
+def _is_valid_youtube_id(video_id):
+    return bool(_YT_ID_ONLY_RE.fullmatch(video_id or ""))
+
+
+def load_failed_ids():
+    """Read .failed.txt entries formatted like: youtube VIDEO_ID."""
+    ids = set()
+    if not FAILED_FILE.exists():
+        return ids
+    try:
+        for raw_line in FAILED_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == "youtube" and _is_valid_youtube_id(parts[1]):
+                ids.add(parts[1])
+    except Exception:
+        pass
+    return ids
+
+
+def append_failed_id(video_id, failed_ids):
+    """Append a permanent-dead YouTube ID to .failed.txt immediately."""
+    if not _is_valid_youtube_id(video_id) or video_id in failed_ids:
+        return False
+
+    FAILED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with FAILED_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"youtube {video_id}\n")
+        f.flush()
+    failed_ids.add(video_id)
+    return True
+
+
+def build_match_filter(failed_ids):
+    """Build one yt-dlp match-filter expression.
+
+    Multiple --match-filter args are OR'd by yt-dlp, so live-video filtering and
+    the failed-ID blacklist must stay in one combined expression.
+    """
+    parts = list(_BASE_MATCH_FILTERS)
+    parts.extend(f"id != '{video_id}'" for video_id in sorted(failed_ids))
+    return " & ".join(parts)
+
+
+def build_cookie_args(use_cookies=True):
+    return ["--cookies-from-browser", COOKIE_BROWSER] if use_cookies else []
+
+
+def build_ytdlp_cmd(url, failed_ids, force_playlist=False, use_cookies=True):
+    """Build the real yt-dlp download command."""
+    playlist_args = ["--yes-playlist"] if force_playlist else []
+    return [
+        "yt-dlp",
+        *playlist_args,
+        *_YTDLP_DOWNLOAD_ARGS,
+        "--match-filter", build_match_filter(failed_ids),
+        *build_cookie_args(use_cookies),
+        url,
+    ]
+
+
+def build_preflight_cmd(url, use_cookies=True):
+    """Build a small auth/session check command."""
+    return [
+        "yt-dlp",
+        "--simulate",
+        "--no-download",
+        "--no-playlist",
+        *build_cookie_args(use_cookies),
+        url,
+    ]
+
+
+def classify_ytdlp_line(line):
+    """Return (kind, video_id) for one yt-dlp output line.
+
+    kind is one of: "permanent", "fatal", or None.
+    """
+    lower = line.lower()
+    match = _YT_ID_RE.search(line)
+    video_id = match.group(1) if match else None
+
+    if (
+        video_id
+        and "try again later" not in lower
+        and any(phrase in lower for phrase in _PERMANENT_FAILURE_PHRASES)
+    ):
+        return "permanent", video_id
+
+    if any(phrase in lower for phrase in _FATAL_STOP_PHRASES):
+        return "fatal", video_id
+
+    return None, video_id
+
+
+def should_suppress_ytdlp_line(line):
+    """Hide yt-dlp's noisy per-item match-filter skip lines."""
+    lower = line.lower()
+    return any(phrase in lower for phrase in _SUPPRESSED_OUTPUT_PHRASES) and "skipping" in lower
+
+
+def preflight_youtube(url, use_cookies=True):
+    """Quick yt-dlp auth/session check before a real download run."""
+    print("  Preflight check...")
+    result = subprocess.run(
+        build_preflight_cmd(url, use_cookies=use_cookies),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+    )
+    output = result.stdout or ""
+
+    fatal_line = None
+    for line in output.splitlines():
+        kind, _ = classify_ytdlp_line(line)
+        if kind == "fatal":
+            fatal_line = line.strip()
+            break
+
+    if result.returncode != 0 or fatal_line:
+        reason = fatal_line or "yt-dlp preflight failed"
+        print(f"  Preflight failed: {reason}")
+        notify_full_stop("Download stopped", reason[:180])
+        return False
+
+    print("  Preflight OK")
+    return True
+
+
+def run_ytdlp_streaming(cmd, failed_ids):
+    """Run yt-dlp, stream clean output, and save permanent-dead IDs live."""
+    fatal_seen = None
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
+            bufsize=1,
+        )
+    except Exception as e:
+        msg = f"Could not start yt-dlp: {e}"
+        print(f"  {msg}")
+        notify_full_stop("Download stopped", msg)
+        return 1, msg
+
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        kind, video_id = classify_ytdlp_line(line)
+        if not should_suppress_ytdlp_line(line):
+            print(line, end="")
+        if kind == "permanent" and video_id:
+            if append_failed_id(video_id, failed_ids):
+                print(f"  [failed] saved youtube {video_id} → {FAILED_FILE}")
+        elif kind == "fatal" and fatal_seen is None:
+            fatal_seen = line.strip()
+
+    return proc.wait(), fatal_seen
+
+
 # ── Download ───────────────────────────────────────────────────────────────
 
-def download(url, dry_run=False):
+def download(url, dry_run=False, force_playlist=False, use_cookies=True):
     """Run yt-dlp to download a playlist or video to the landing dir."""
     LANDING_DIR.mkdir(parents=True, exist_ok=True)
     ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FAILED_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
-        "yt-dlp",
-        "--extract-audio",
-        "--audio-format",         "m4a",
-        "--audio-quality",        "0",
-        "--embed-thumbnail",
-        "--convert-thumbnails",   "jpg",
-        "--embed-metadata",
-        "--embed-subs",
-        "--sub-langs",            "en.*",
-        "--download-archive",     str(ARCHIVE_FILE),
-        "--output",               str(LANDING_DIR / "%(uploader)s - %(title)s.%(ext)s"),
-        "--ignore-errors",
-        "--continue",
-        "--no-overwrites",
-        "--sleep-interval",       "2",
-        "--max-sleep-interval",   "5",
-        "--sleep-requests",       "1",
-        "--rate-limit",           "1.5M",
-        "--concurrent-fragments", "3",
-        "--retries",              "infinite",
-        "--fragment-retries",     "infinite",
-        "--parse-metadata",       "%(uploader)s:%(meta_artist)s",
-        "--parse-metadata",       "%(title)s:%(meta_title)s",
-        "--replace-in-metadata",  "uploader", " - Topic$", "",
-        "--match-filter",         "!is_live & !live",
-        "--check-formats",
-    ]
-
-    if _BROWSER_PROFILE:
-        cmd += ["--cookies-from-browser", f"{_BROWSER}:{_BROWSER_PROFILE}"]
-    else:
-        cmd += ["--cookies-from-browser", _BROWSER]
-
-    cmd.append(url)
+    failed_ids = load_failed_ids()
+    cmd = build_ytdlp_cmd(
+        url,
+        failed_ids,
+        force_playlist=force_playlist,
+        use_cookies=use_cookies,
+    )
 
     if dry_run:
         print(f"  [dry run] yt-dlp → {LANDING_DIR}")
+        print(f"  Failed IDs skipped: {len(failed_ids)} from {FAILED_FILE}")
+        print("  " + shlex.join(str(part) for part in cmd))
         return
 
+    preflight_url = PREFLIGHT_VIDEO_URL if force_playlist else url
+    if not preflight_youtube(preflight_url, use_cookies=use_cookies):
+        sys.exit(1)
+
+    print(f"  Failed IDs skipped: {len(failed_ids)} from {FAILED_FILE}")
     print(f"  Downloading to {LANDING_DIR}")
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"  yt-dlp exited with code {result.returncode} (some items may have been skipped)")
+
+    result_code, fatal_seen = run_ytdlp_streaming(cmd, failed_ids)
+    if result_code != 0:
+        if fatal_seen:
+            print(f"  yt-dlp stopped with code {result_code}: {fatal_seen}")
+            notify_full_stop("Download stopped", fatal_seen[:180])
+        else:
+            print(f"  yt-dlp exited with code {result_code} (some items may have been skipped)")
 
 # ── Cover crop ─────────────────────────────────────────────────────────────
 
@@ -1009,7 +1271,7 @@ def main():
         description="Download, clean, tag, and sort music files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("url",           nargs="?",          help="YouTube playlist or video URL")
+    parser.add_argument("url",           nargs="?",          help="Use 'playlist' for the hardcoded main playlist, or pass a YouTube URL")
     parser.add_argument("--process",     metavar="DIR",       help="Process existing files (skip download)")
     parser.add_argument("--dry-run",     action="store_true", help="Preview changes without modifying files")
     parser.add_argument("--skip-crop",   action="store_true", help="Skip cover art cropping")
@@ -1018,9 +1280,11 @@ def main():
     parser.add_argument("--skip-sort",   action="store_true", help="Skip sorting into folders")
     parser.add_argument("--verbose",     action="store_true", help="Show Last.fm tag details per file")
     parser.add_argument("--force",       action="store_true", help="Re-tag files that already have a genre")
+    parser.add_argument("--no-cookies",  action="store_true", help="Do not pass Chromium cookies to yt-dlp")
     args = parser.parse_args()
 
     if not args.url and not args.process:
+        print("Error: choose either `download playlist`, `download <url>`, or `download --process <dir>`\n")
         parser.print_help()
         sys.exit(1)
 
@@ -1030,8 +1294,23 @@ def main():
     # Step 1: Download
     if args.url:
         print("── Download " + "─" * 39)
-        download(args.url, dry_run=args.dry_run)
+        if args.url.lower() == "playlist":
+            url = DEFAULT_PLAYLIST_URL
+            force_playlist = True
+            print("  Source: The Mix")
+        else:
+            url = args.url
+            force_playlist = False
+            print("  Source: supplied URL")
+        download(
+            url,
+            dry_run=args.dry_run,
+            force_playlist=force_playlist,
+            use_cookies=not args.no_cookies,
+        )
         print()
+        if args.dry_run:
+            return
         scan_dir = LANDING_DIR
     else:
         scan_dir = Path(args.process)
@@ -1041,7 +1320,10 @@ def main():
 
     files = sorted(scan_dir.rglob("*.m4a"))
     if not files:
-        print("No .m4a files found.")
+        if args.url:
+            print("No new .m4a files found in landing. Playlist may already be synced, or only skipped/unavailable items were hit.")
+        else:
+            print("No .m4a files found.")
         return
     print(f"Found {len(files)} files in {scan_dir}\n")
 
