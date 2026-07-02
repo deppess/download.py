@@ -45,6 +45,11 @@ Last.fm genre tagging requires `~/.config/genre-tagger.cfg`:
 ```ini
 [lastfm]
 api_key = YOUR_LASTFM_API_KEY
+
+# Optional — only needed if YouTube bot detection starts triggering.
+# See: https://github.com/Brainicism/bgutil-ytdlp-pot-provider
+[youtube]
+po_token = VISITOR_DATA+TOKEN
 ```
 
 ## Commands
@@ -64,6 +69,7 @@ download --process <dir> --dry-run preview changes without writing files
 --force          re-tag files that already have a valid genre
 --verbose        show Last.fm tags and scoring
 --no-cookies     run yt-dlp without Chromium cookies
+--po-token       YouTube PO token (VISITOR_DATA+TOKEN); overrides config
 ```
 
 Bare `download` intentionally fails instead of syncing the playlist by accident.
@@ -91,14 +97,16 @@ Collection overrides route matching filenames into fixed soundtrack folders, suc
 
 ```text
 .downloaded.txt  yt-dlp success archive; managed by yt-dlp
-.failed.txt      permanent unavailable-video skip list; managed by download.py
+.failed.txt      permanent unavailable-video log; managed by download.py
 ```
 
-`.failed.txt` is updated live when yt-dlp reports a permanent unavailable YouTube ID. Future runs skip those IDs by default while leaving `.downloaded.txt` untouched.
+`.failed.txt` is updated live when yt-dlp reports a permanently unavailable YouTube ID. Those IDs are also written into `.downloaded.txt` so yt-dlp skips them via its own archive on future runs, keeping the match-filter expression small regardless of how many dead IDs accumulate.
 
 ## YouTube Handling
 
 `download playlist` runs a quick preflight check before the full sync. It uses Chromium cookies from `COOKIE_BROWSER`, keeps yt-dlp's normal archive behavior, streams yt-dlp output live, suppresses failed-ID filter noise, and sends a desktop notification only for full-stop failures such as cookie/auth/rate-limit problems.
+
+If YouTube bot detection triggers, the preflight prints actionable fix options including PO token setup. A token can be supplied via `--po-token` or `po_token` in the config; without one, Chromium cookies alone are the auth layer.
 
 ## License
 

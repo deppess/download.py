@@ -24,6 +24,8 @@ Usage:
     --verbose      Show Last.fm tag details per file
     --force        Re-tag files that already have a valid genre
     --no-cookies   Do not pass Chromium cookies to yt-dlp
+    --po-token     YouTube PO token (VISITOR_DATA+TOKEN); can also be set via
+                   po_token = ... under [youtube] in genre-tagger.cfg
 
 Notes:
     .downloaded.txt remains yt-dlp's normal success archive.
@@ -212,7 +214,7 @@ GENRE_TAGS = {
         "afrobeat", "afrobeats", "afro",
         "world music", "world", "worldbeat",
         "latin", "salsa", "cumbia", "bachata",
-        "bossa nova", "mpb", "brazilian",
+        "mpb", "brazilian",
         "flamenco", "fado",
         "indian classical", "bollywood", "bhangra",
         "middle eastern", "arabic",
@@ -293,7 +295,7 @@ GENRE_TAGS = {
         "pc music",
         "nightcore",
         "denpa",
-        "eurobeat", "super eurobeat", "para para",
+        "super eurobeat", "para para",
     },
 
     "Oldies": {
@@ -457,7 +459,9 @@ def get_track_tags(network, artist, title):
     try:
         top = network.get_track(artist, title).get_top_tags(limit=10)
         if top:
-            return [(t.item.get_name(), int(t.weight)) for t in top]
+            tags = [(t.item.get_name(), int(t.weight)) for t in top]
+            time.sleep(RATE_LIMIT)
+            return tags
     except Exception:
         pass
     return []
@@ -581,7 +585,6 @@ def try_artist_from_title(network, title, cache):
                 if track_tags:
                     return track_tags, "title_parse_track"
 
-        if len(right) >= 2:
             tags = get_artist_tags(network, right, cache)
             if tags:
                 return tags, "title_parse_reverse"
@@ -670,7 +673,6 @@ _YTDLP_DOWNLOAD_ARGS = [
     "--download-archive",     str(ARCHIVE_FILE),
     "--output",               str(LANDING_DIR / "%(uploader)s - %(title)s.%(ext)s"),
     "--ignore-errors",
-    "--no-abort-on-error",
     "--continue",
     "--no-overwrites",
     "--lazy-playlist",
@@ -694,7 +696,6 @@ _YTDLP_DOWNLOAD_ARGS = [
     "--parse-metadata",       "%(uploader)s:%(meta_artist)s",
     "--parse-metadata",       "%(title)s:%(meta_title)s",
     "--replace-in-metadata",  "uploader", " - Topic$", "",
-    "--check-formats",
 ]
 
 
@@ -736,7 +737,7 @@ def load_failed_ids():
 
 
 def append_failed_id(video_id, failed_ids):
-    """Append a permanent-dead YouTube ID to .failed.txt immediately."""
+    """Append a permanent-dead YouTube ID to .failed.txt and the download archive immediately."""
     if not _is_valid_youtube_id(video_id) or video_id in failed_ids:
         return False
 
@@ -744,46 +745,77 @@ def append_failed_id(video_id, failed_ids):
     with FAILED_FILE.open("a", encoding="utf-8") as f:
         f.write(f"youtube {video_id}\n")
         f.flush()
+    ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with ARCHIVE_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"youtube {video_id}\n")
+        f.flush()
     failed_ids.add(video_id)
     return True
 
 
-def build_match_filter(failed_ids):
-    """Build one yt-dlp match-filter expression.
+_MATCH_FILTER = " & ".join(_BASE_MATCH_FILTERS)
 
-    Multiple --match-filter args are OR'd by yt-dlp, so live-video filtering and
-    the failed-ID blacklist must stay in one combined expression.
+
+def sync_failed_to_archive(failed_ids):
+    """Write any .failed.txt IDs not yet in the download archive.
+
+    yt-dlp silently skips anything in its archive, so this keeps the
+    match-filter expression small (live-only filtering) regardless of how
+    many IDs accumulate in .failed.txt over time.
     """
-    parts = list(_BASE_MATCH_FILTERS)
-    parts.extend(f"id != '{video_id}'" for video_id in sorted(failed_ids))
-    return " & ".join(parts)
+    if not failed_ids:
+        return
+    archive_ids: set[str] = set()
+    if ARCHIVE_FILE.exists():
+        try:
+            for line in ARCHIVE_FILE.read_text(encoding="utf-8").splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and parts[0] == "youtube" and _is_valid_youtube_id(parts[1]):
+                    archive_ids.add(parts[1])
+        except Exception:
+            pass
+    missing = failed_ids - archive_ids
+    if not missing:
+        return
+    ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with ARCHIVE_FILE.open("a", encoding="utf-8") as f:
+            for vid_id in sorted(missing):
+                f.write(f"youtube {vid_id}\n")
+            f.flush()
+    except Exception:
+        pass
 
 
 def build_cookie_args(use_cookies=True):
     return ["--cookies-from-browser", COOKIE_BROWSER] if use_cookies else []
 
 
-def build_ytdlp_cmd(url, failed_ids, force_playlist=False, use_cookies=True):
+def build_ytdlp_cmd(url, force_playlist=False, use_cookies=True, po_token=None):
     """Build the real yt-dlp download command."""
     playlist_args = ["--yes-playlist"] if force_playlist else []
+    po_args = ["--extractor-args", f"youtube:po_token={po_token}"] if po_token else []
     return [
         "yt-dlp",
         *playlist_args,
         *_YTDLP_DOWNLOAD_ARGS,
-        "--match-filter", build_match_filter(failed_ids),
+        "--match-filter", _MATCH_FILTER,
         *build_cookie_args(use_cookies),
+        *po_args,
         url,
     ]
 
 
-def build_preflight_cmd(url, use_cookies=True):
+def build_preflight_cmd(url, use_cookies=True, po_token=None):
     """Build a small auth/session check command."""
+    po_args = ["--extractor-args", f"youtube:po_token={po_token}"] if po_token else []
     return [
         "yt-dlp",
         "--simulate",
         "--no-download",
         "--no-playlist",
         *build_cookie_args(use_cookies),
+        *po_args,
         url,
     ]
 
@@ -816,11 +848,11 @@ def should_suppress_ytdlp_line(line):
     return any(phrase in lower for phrase in _SUPPRESSED_OUTPUT_PHRASES) and "skipping" in lower
 
 
-def preflight_youtube(url, use_cookies=True):
+def preflight_youtube(url, use_cookies=True, po_token=None):
     """Quick yt-dlp auth/session check before a real download run."""
     print("  Preflight check...")
     result = subprocess.run(
-        build_preflight_cmd(url, use_cookies=use_cookies),
+        build_preflight_cmd(url, use_cookies=use_cookies, po_token=po_token),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -838,6 +870,12 @@ def preflight_youtube(url, use_cookies=True):
     if result.returncode != 0 or fatal_line:
         reason = fatal_line or "yt-dlp preflight failed"
         print(f"  Preflight failed: {reason}")
+        lower = reason.lower()
+        if "bot" in lower or "sign in" in lower or "429" in lower:
+            print("  Tip: YouTube bot/rate detection triggered. Fix options:")
+            print("    1. pip install bgutil-ytdlp-pot-provider  (auto PO token, recommended)")
+            print("    2. Add po_token = VISITOR_DATA+TOKEN under [youtube] in genre-tagger.cfg")
+            print("    3. Pass --po-token VISITOR_DATA+TOKEN on the command line")
         notify_full_stop("Download stopped", reason[:180])
         return False
 
@@ -863,8 +901,7 @@ def run_ytdlp_streaming(cmd, failed_ids):
         notify_full_stop("Download stopped", msg)
         return 1, msg
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
+    for line in proc.stdout:  # type: ignore[union-attr]
         kind, video_id = classify_ytdlp_line(line)
         if not should_suppress_ytdlp_line(line):
             print(line, end="")
@@ -879,18 +916,19 @@ def run_ytdlp_streaming(cmd, failed_ids):
 
 # ── Download ───────────────────────────────────────────────────────────────
 
-def download(url, dry_run=False, force_playlist=False, use_cookies=True):
+def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_token=None):
     """Run yt-dlp to download a playlist or video to the landing dir."""
     LANDING_DIR.mkdir(parents=True, exist_ok=True)
     ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
     FAILED_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     failed_ids = load_failed_ids()
+    sync_failed_to_archive(failed_ids)
     cmd = build_ytdlp_cmd(
         url,
-        failed_ids,
         force_playlist=force_playlist,
         use_cookies=use_cookies,
+        po_token=po_token,
     )
 
     if dry_run:
@@ -900,7 +938,7 @@ def download(url, dry_run=False, force_playlist=False, use_cookies=True):
         return
 
     preflight_url = PREFLIGHT_VIDEO_URL if force_playlist else url
-    if not preflight_youtube(preflight_url, use_cookies=use_cookies):
+    if not preflight_youtube(preflight_url, use_cookies=use_cookies, po_token=po_token):
         sys.exit(1)
 
     print(f"  Failed IDs skipped: {len(failed_ids)} from {FAILED_FILE}")
@@ -1149,7 +1187,6 @@ def tag_files(files, network, dry_run=False, verbose=False, force=False):
         tags = get_track_tags(network, artist_clean, title)
         if tags:
             source = "lastfm_track"
-        time.sleep(RATE_LIMIT)
 
         if not tags:
             tags = get_artist_tags(network, artist_clean, artist_cache)
@@ -1281,6 +1318,7 @@ def main():
     parser.add_argument("--verbose",     action="store_true", help="Show Last.fm tag details per file")
     parser.add_argument("--force",       action="store_true", help="Re-tag files that already have a genre")
     parser.add_argument("--no-cookies",  action="store_true", help="Do not pass Chromium cookies to yt-dlp")
+    parser.add_argument("--po-token",    metavar="TOKEN",     help="YouTube PO token (VISITOR_DATA+TOKEN); overrides config file")
     args = parser.parse_args()
 
     if not args.url and not args.process:
@@ -1290,6 +1328,13 @@ def main():
 
     if args.dry_run:
         print("DRY RUN — no files will be modified\n")
+
+    # Read config once — used by both download (po_token) and tagging (api_key).
+    config = configparser.ConfigParser()
+    if CONFIG_FILE.exists():
+        config.read(CONFIG_FILE)
+
+    po_token = args.po_token or config.get("youtube", "po_token", fallback=None) or None
 
     # Step 1: Download
     if args.url:
@@ -1307,6 +1352,7 @@ def main():
             dry_run=args.dry_run,
             force_playlist=force_playlist,
             use_cookies=not args.no_cookies,
+            po_token=po_token,
         )
         print()
         if args.dry_run:
@@ -1352,13 +1398,11 @@ def main():
     # Step 4: Tag genres
     file_genres = []
     if not args.skip_tag:
-        if not CONFIG_FILE.exists():
-            print(f"Error: config not found at {CONFIG_FILE}")
+        if not CONFIG_FILE.exists() or not config.has_option("lastfm", "api_key"):
+            print(f"Error: config not found or missing [lastfm] api_key at {CONFIG_FILE}")
             print("Expected format: [lastfm] / api_key = YOUR_KEY")
             sys.exit(1)
 
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE)
         network = pylast.LastFMNetwork(api_key=config["lastfm"]["api_key"])
 
         print("── Tag Genres " + "─" * 36)
