@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/opt/local/bin/python3.13
 """
 download.py — Download, clean, tag, and sort music files.
 
@@ -52,25 +52,29 @@ from collections import defaultdict
 try:
     import pylast
 except ImportError:
-    print("Error: python-pylast not installed. Run: sudo pacman -S python-pylast")
+    print("Error: pylast not installed. Run: sudo port install py313-pylast")
     sys.exit(1)
 
 try:
     import mutagen.mp4
     from mutagen.mp4 import MP4Cover
 except ImportError:
-    print("Error: python-mutagen not installed. Run: sudo pacman -S python-mutagen")
+    print("Error: mutagen not installed. Run: sudo port install py313-mutagen")
     sys.exit(1)
 
 try:
     from PIL import Image
 except ImportError:
-    print("Error: python-pillow not installed. Run: sudo pacman -S python-pillow")
+    print("Error: Pillow not installed. Run: sudo port install py313-pillow")
     sys.exit(1)
 
 # ── Config ───────────────────────────────────────────────────────────────
 
-MUSIC_DIR     = Path("/home/deppes/Media/music")
+if sys.platform == "darwin":
+    MUSIC_DIR = Path("/Users/deppes/Music")
+else:
+    MUSIC_DIR = Path("/home/deppes/Media/music")
+
 LANDING_DIR   = MUSIC_DIR / "playlists" / "000-Landing"
 PLAYLISTS_DIR = MUSIC_DIR / "playlists"
 LYRICS_DIR    = MUSIC_DIR / "lyrics"
@@ -82,13 +86,17 @@ LOG_DIR       = MUSIC_DIR
 # Main library playlist. Bare `download` intentionally does not use this; run `download playlist`.
 DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
 
-# yt-dlp cookie source verified from: ~/.config/chromium/Profile 1/Cookies
-COOKIE_BROWSER = "chromium:Profile 1"
+if sys.platform == "darwin":
+    # Helium is Chromium-based, but yt-dlp does not support `helium:` by name.
+    COOKIE_BROWSER = "chromium:/Users/deppes/Library/Application Support/net.imput.helium/Default"
+else:
+    # yt-dlp cookie source verified from: ~/.config/chromium/Profile 1/Cookies
+    COOKIE_BROWSER = "chromium:Profile 1"
 
 # Fast preflight target for the hardcoded playlist path.
 PREFLIGHT_VIDEO_URL = "https://www.youtube.com/watch?v=Yr8AD0T8YXY"
 
-# Desktop notification command. Mako receives notify-send notifications.
+# Desktop notification app label.
 NOTIFY_APP = "download"
 
 # ── Collections (keyword → sort folder override) ──────────────────────────
@@ -701,6 +709,24 @@ _YTDLP_DOWNLOAD_ARGS = [
 
 def notify_full_stop(title, body):
     """Send a desktop notification for full-stop failures only."""
+    if sys.platform == "darwin":
+        if not shutil.which("osascript"):
+            return
+        try:
+            subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f"display notification {json.dumps(body)} with title {json.dumps(title)} subtitle {json.dumps(NOTIFY_APP)}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+        return
+
     if not shutil.which("notify-send"):
         return
     try:
@@ -789,6 +815,58 @@ def sync_failed_to_archive(failed_ids):
 
 def build_cookie_args(use_cookies=True):
     return ["--cookies-from-browser", COOKIE_BROWSER] if use_cookies else []
+
+
+def _read_keychain_password(account, service):
+    """Read one generic-password item from macOS Keychain."""
+    result = subprocess.run(
+        ["security", "find-generic-password", "-w", "-a", account, "-s", service],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.stdout.rstrip(b"\n") if result.returncode == 0 else None
+
+
+def _write_keychain_password(account, service, password):
+    result = subprocess.run(
+        ["security", "add-generic-password", "-a", account, "-s", service, "-w", password.decode("utf-8")],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def setup_helium_cookies():
+    """Create the Keychain alias yt-dlp needs to decrypt Helium cookies."""
+    if sys.platform != "darwin":
+        print("Helium cookie setup is only needed on macOS.")
+        return 1
+    if not shutil.which("security"):
+        print("Error: macOS security command not found.")
+        return 1
+
+    helium_key = _read_keychain_password("Helium", "Helium Storage Key")
+    if not helium_key:
+        print("Error: Helium Storage Key not found in Keychain. Open Helium once and sign in to YouTube.")
+        return 1
+
+    chromium_key = _read_keychain_password("Chromium", "Chromium Safe Storage")
+    if chromium_key == helium_key:
+        print("Helium cookie Keychain alias already configured.")
+        return 0
+    if chromium_key:
+        print("Error: Chromium Safe Storage already exists and differs from Helium's key.")
+        print("Refusing to overwrite it; real Chromium may be using it.")
+        return 1
+
+    if not _write_keychain_password("Chromium", "Chromium Safe Storage", helium_key):
+        print("Error: failed to create Chromium Safe Storage Keychain alias.")
+        return 1
+
+    print("Created Chromium Safe Storage Keychain alias for Helium cookies.")
+    return 0
 
 
 def build_ytdlp_cmd(url, force_playlist=False, use_cookies=True, po_token=None):
@@ -1319,7 +1397,11 @@ def main():
     parser.add_argument("--force",       action="store_true", help="Re-tag files that already have a genre")
     parser.add_argument("--no-cookies",  action="store_true", help="Do not pass Chromium cookies to yt-dlp")
     parser.add_argument("--po-token",    metavar="TOKEN",     help="YouTube PO token (VISITOR_DATA+TOKEN); overrides config file")
+    parser.add_argument("--setup-helium-cookies", action="store_true", help="Create macOS Keychain alias for Helium cookies")
     args = parser.parse_args()
+
+    if args.setup_helium_cookies:
+        sys.exit(setup_helium_cookies())
 
     if not args.url and not args.process:
         print("Error: choose either `download playlist`, `download <url>`, or `download --process <dir>`\n")

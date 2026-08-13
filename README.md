@@ -1,43 +1,48 @@
 # download.py
 
-YouTube music sync pipeline for Linux — downloads with yt-dlp, crops cover art, cleans filenames, tags genres with Last.fm, fetches synced LRCLIB lyrics, and sorts `.m4a` files into genre folders.
+YouTube music sync pipeline for Linux and macOS. Downloads with `yt-dlp`, crops cover art, cleans filenames, tags genres with Last.fm, fetches synced LRCLIB lyrics, and sorts `.m4a` files into genre folders.
 
 ## Dependencies
 
-```bash
-yt-dlp  ffmpeg  python-pylast  python-mutagen  python-pillow
-libnotify   # desktop error notifications via notify-send / mako
-```
-
-Arch:
+Arch Linux:
 
 ```bash
 sudo pacman -S yt-dlp ffmpeg python-pylast python-mutagen python-pillow libnotify
 ```
 
+macOS:
+
+```bash
+brew install yt-dlp ffmpeg
+sudo port install py313-pylast py313-mutagen py313-pillow
+```
+
+macOS notifications use `osascript`. Linux notifications use `notify-send` when available.
+
 ## Install
 
 ```bash
-chmod +x download.py
-cp download.py ~/.local/bin/download
+install -m 755 download.py ~/.local/bin/download
 ```
 
 Make sure `~/.local/bin` is in your `PATH`.
 
 ## Config
 
-Main paths and playlist settings live at the top of `download.py`:
+Main paths and playlist settings live at the top of `download.py`.
+
+Linux defaults to:
 
 ```python
-MUSIC_DIR     = Path("/home/deppes/Media/music")
-LANDING_DIR   = MUSIC_DIR / "playlists" / "000-Landing"
-PLAYLISTS_DIR = MUSIC_DIR / "playlists"
-LYRICS_DIR    = MUSIC_DIR / "lyrics"
-ARCHIVE_FILE  = MUSIC_DIR / ".downloaded.txt"
-FAILED_FILE   = MUSIC_DIR / ".failed.txt"
-
-DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
+MUSIC_DIR = Path("/home/deppes/Media/music")
 COOKIE_BROWSER = "chromium:Profile 1"
+```
+
+macOS defaults to:
+
+```python
+MUSIC_DIR = Path("/Users/deppes/Music")
+COOKIE_BROWSER = "chromium:/Users/deppes/Library/Application Support/net.imput.helium/Default"
 ```
 
 Last.fm genre tagging requires `~/.config/genre-tagger.cfg`:
@@ -46,11 +51,18 @@ Last.fm genre tagging requires `~/.config/genre-tagger.cfg`:
 [lastfm]
 api_key = YOUR_LASTFM_API_KEY
 
-# Optional — only needed if YouTube bot detection starts triggering.
-# See: https://github.com/Brainicism/bgutil-ytdlp-pot-provider
 [youtube]
+# Optional; only needed if YouTube bot detection starts triggering.
 po_token = VISITOR_DATA+TOKEN
 ```
+
+For Helium cookies on macOS, run once:
+
+```bash
+download --setup-helium-cookies
+```
+
+When migrating an existing library, keep `.downloaded.txt` and `.failed.txt` in `MUSIC_DIR` so yt-dlp skips already synced videos.
 
 ## Commands
 
@@ -61,6 +73,8 @@ download --process <dir>           process existing `.m4a` files only
 download --process <dir> --dry-run preview changes without writing files
 ```
 
+Useful flags:
+
 ```bash
 --skip-crop      skip embedded cover crop
 --skip-tag       skip Last.fm genre tagging
@@ -68,8 +82,8 @@ download --process <dir> --dry-run preview changes without writing files
 --skip-sort      skip moving files into folders
 --force          re-tag files that already have a valid genre
 --verbose        show Last.fm tags and scoring
---no-cookies     run yt-dlp without Chromium cookies
---po-token       YouTube PO token (VISITOR_DATA+TOKEN); overrides config
+--no-cookies     run yt-dlp without browser cookies
+--po-token       YouTube PO token; overrides config
 ```
 
 Bare `download` intentionally fails instead of syncing the playlist by accident.
@@ -77,36 +91,24 @@ Bare `download` intentionally fails instead of syncing the playlist by accident.
 ## Pipeline
 
 ```text
-yt-dlp → playlists/000-Landing/
+yt-dlp -> playlists/000-Landing/
   crop embedded cover art to 1:1
   strip playlist index prefix + "- Topic" from filenames
-  Last.fm lookup → write genre metadata
-  LRCLIB lookup → save synced `.lrc` files
+  Last.fm lookup -> write genre metadata
+  LRCLIB lookup -> save synced `.lrc` files
   move into playlists/{Genre}/
 ```
 
-Genre buckets:
-
-```text
-Hip Hop · Rock & Metal · Soul · Electronic · Oldies · Misc
-```
-
-Collection overrides route matching filenames into fixed soundtrack folders, such as Initial D, Jet Set Radio, and Bomb Rush Cyberfunk. Edit `COLLECTIONS` in the script to add more.
+Genre buckets: `Hip Hop`, `Rock & Metal`, `Soul`, `Electronic`, `Oldies`, `Misc`.
 
 ## State Files
 
 ```text
-.downloaded.txt  yt-dlp success archive; managed by yt-dlp
-.failed.txt      permanent unavailable-video log; managed by download.py
+.downloaded.txt  yt-dlp success archive
+.failed.txt      permanent unavailable-video log
 ```
 
-`.failed.txt` is updated live when yt-dlp reports a permanently unavailable YouTube ID. Those IDs are also written into `.downloaded.txt` so yt-dlp skips them via its own archive on future runs, keeping the match-filter expression small regardless of how many dead IDs accumulate.
-
-## YouTube Handling
-
-`download playlist` runs a quick preflight check before the full sync. It uses Chromium cookies from `COOKIE_BROWSER`, keeps yt-dlp's normal archive behavior, streams yt-dlp output live, suppresses failed-ID filter noise, and sends a desktop notification only for full-stop failures such as cookie/auth/rate-limit problems.
-
-If YouTube bot detection triggers, the preflight prints actionable fix options including PO token setup. A token can be supplied via `--po-token` or `po_token` in the config; without one, Chromium cookies alone are the auth layer.
+`.failed.txt` IDs are also written into `.downloaded.txt` so yt-dlp skips permanently unavailable videos on future runs.
 
 ## License
 
