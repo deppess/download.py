@@ -1,14 +1,14 @@
 #!/opt/local/bin/python3.13
 """
-download.py — Download, clean, tag, and sort music files.
+download.py — Download, clean, tag, and import music files.
 
 Pipeline (all steps run by default):
-  1. Download    yt-dlp → landing dir (requires URL)
+  1. Download    yt-dlp → landing/staging dir (requires URL)
   2. Crop        Center-crop embedded cover art to 1:1
   3. Clean       Strip 4-digit index and '- Topic' from filenames
   4. Tag         Last.fm genre lookup → genre buckets
-  5. Lyrics      Fetch synced lyrics from LRCLIB
-  6. Sort        Move files into genre/collection folders
+  5. Lyrics      Fetch lyrics from LRCLIB
+  6. Sort/Import Linux: genre folders; macOS: Apple Music auto-import
 
 Usage:
     download playlist                    Sync the hardcoded main playlist
@@ -19,7 +19,7 @@ Usage:
     --skip-crop    Skip cover art cropping
     --skip-tag     Skip genre tagging
     --skip-lyrics  Skip lyrics fetching
-    --skip-sort    Skip sorting into folders
+    --skip-sort    Skip final sort/import
     --dry-run      Preview all changes without modifying files
     --verbose      Show Last.fm tag details per file
     --force        Re-tag files that already have a valid genre
@@ -72,16 +72,19 @@ except ImportError:
 
 if sys.platform == "darwin":
     MUSIC_DIR = Path("/Users/deppes/Music")
+    LANDING_DIR = MUSIC_DIR / "download-staging"
+    APPLE_MUSIC_AUTO_ADD_DIR = MUSIC_DIR / "Music" / "Media.localized" / "Automatically Add to Music.localized"
 else:
     MUSIC_DIR = Path("/home/deppes/Media/music")
+    LANDING_DIR = MUSIC_DIR / "playlists" / "000-Landing"
+    APPLE_MUSIC_AUTO_ADD_DIR = None
 
-LANDING_DIR   = MUSIC_DIR / "playlists" / "000-Landing"
-PLAYLISTS_DIR = MUSIC_DIR / "playlists"
-LYRICS_DIR    = MUSIC_DIR / "lyrics"
-ARCHIVE_FILE  = MUSIC_DIR / ".downloaded.txt"
-FAILED_FILE   = MUSIC_DIR / ".failed.txt"
-CONFIG_FILE   = Path.home() / ".config" / "genre-tagger.cfg"
-LOG_DIR       = MUSIC_DIR
+PLAYLISTS_DIR  = MUSIC_DIR / "playlists"
+LYRICS_DIR     = MUSIC_DIR / "lyrics"
+ARCHIVE_FILE   = MUSIC_DIR / ".downloaded.txt"
+FAILED_FILE    = MUSIC_DIR / ".failed.txt"
+CONFIG_FILE    = Path.home() / ".config" / "genre-tagger.cfg"
+LOG_DIR        = MUSIC_DIR
 
 # Main library playlist. Bare `download` intentionally does not use this; run `download playlist`.
 DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
@@ -1127,6 +1130,8 @@ def clean_filenames(files, dry_run=False):
 
 LRCLIB_API   = "https://lrclib.net/api/get"
 _RE_LRC_SAFE = re.compile(r'[\\/<>|]')
+_RE_LRC_TAG  = re.compile(r"\[[a-zA-Z]+:[^\]]*\]")
+_RE_LRC_TIME = re.compile(r"\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]")
 
 
 def _lrc_path(artist, title):
@@ -1148,9 +1153,29 @@ def _fetch_lrclib(artist, title):
         return None
 
 
+def _plain_lyrics_from_lrc(lrc):
+    """Convert synced LRC text to plain lyrics for Apple Music's MP4 lyrics tag."""
+    lines = []
+    for raw_line in lrc.splitlines():
+        line = _RE_LRC_TAG.sub("", raw_line)
+        line = _RE_LRC_TIME.sub("", line).strip()
+        if line:
+            lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _embed_lyrics(filepath, lyrics):
+    audio = mutagen.mp4.MP4(filepath)
+    if not audio.tags:
+        audio.add_tags()
+    audio.tags["\xa9lyr"] = [lyrics]
+    audio.save()
+
+
 def fetch_lyrics(files, dry_run=False):
-    """Fetch synced lyrics from LRCLIB and save as .lrc files."""
-    LYRICS_DIR.mkdir(parents=True, exist_ok=True)
+    """Fetch lyrics from LRCLIB. Linux saves .lrc; macOS embeds plain lyrics."""
+    if sys.platform != "darwin":
+        LYRICS_DIR.mkdir(parents=True, exist_ok=True)
     fetched = skipped = no_match = errors = 0
     total   = len(files)
 
@@ -1176,11 +1201,15 @@ def fetch_lyrics(files, dry_run=False):
             skipped += 1
             continue
 
-        # Raw artist in the header so rmpc matches exactly to MPD metadata.
-        # Cleaned artist used only for the LRCLIB search query.
         lrc_file = _lrc_path(artist, title)
 
-        if lrc_file.exists():
+        if sys.platform == "darwin" and audio.tags.get("\xa9lyr", [""])[0].strip():
+            print(f"{prefix} {filepath.name}")
+            print(f"               → (skip — already embedded)\n")
+            skipped += 1
+            continue
+
+        if sys.platform != "darwin" and lrc_file.exists():
             print(f"{prefix} {filepath.name}")
             print(f"               → (skip — already exists)\n")
             skipped += 1
@@ -1188,24 +1217,40 @@ def fetch_lyrics(files, dry_run=False):
 
         if dry_run:
             print(f"{prefix} {filepath.name}")
-            print(f"               → {lrc_file.name}\n")
+            target = "embedded lyrics" if sys.platform == "darwin" else lrc_file.name
+            print(f"               → {target}\n")
             fetched += 1
             continue
 
         print(f"{prefix} {filepath.name}")
 
-        synced = _fetch_lrclib(clean_artist(artist), title)
+        try:
+            synced = lrc_file.read_text(encoding="utf-8") if lrc_file.exists() else None
+        except OSError:
+            synced = None
+        if not synced:
+            synced = _fetch_lrclib(clean_artist(artist), title)
         if not synced:
             print(f"               → (no synced lyrics found)\n")
             no_match += 1
             continue
 
         try:
-            lrc_file.write_text(f"[ar:{artist}]\n[ti:{title}]\n\n{synced}\n", encoding="utf-8")
-            print(f"               → {lrc_file.name}\n")
+            if sys.platform == "darwin":
+                plain = _plain_lyrics_from_lrc(synced)
+                if not plain:
+                    print(f"               → (no plain lyrics after cleanup)\n")
+                    no_match += 1
+                    continue
+                _embed_lyrics(filepath, plain)
+                print(f"               → embedded lyrics\n")
+            else:
+                lrc_file.write_text(f"[ar:{artist}]\n[ti:{title}]\n\n{synced}\n", encoding="utf-8")
+                print(f"               → {lrc_file.name}\n")
             fetched += 1
         except Exception:
-            print(f"               → (error writing file)\n")
+            action = "embedding lyrics" if sys.platform == "darwin" else "writing file"
+            print(f"               → (error {action})\n")
             errors += 1
 
         time.sleep(LRCLIB_RATE)
@@ -1379,11 +1424,46 @@ def sort_files(file_genres, dry_run=False):
 
     return moved, skipped, errors
 
+
+def import_to_apple_music(files, dry_run=False):
+    """Move completed macOS files into Apple Music's auto-import folder."""
+    moved = skipped = 0
+    errors = []
+
+    if APPLE_MUSIC_AUTO_ADD_DIR is None:
+        return moved, skipped, errors
+
+    for filepath in files:
+        if _stopping:
+            break
+        dest = APPLE_MUSIC_AUTO_ADD_DIR / filepath.name
+
+        if filepath.parent == APPLE_MUSIC_AUTO_ADD_DIR:
+            skipped += 1
+            continue
+
+        if dry_run:
+            print(f"  [import] {filepath.name[:55]:55} → Apple Music")
+            moved += 1
+            continue
+
+        try:
+            APPLE_MUSIC_AUTO_ADD_DIR.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                errors.append(f"SKIP (exists): {filepath.name} → Apple Music auto-import")
+                continue
+            filepath.rename(dest)
+            moved += 1
+        except Exception as e:
+            errors.append(f"ERROR: {filepath.name}: {e}")
+
+    return moved, skipped, errors
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download, clean, tag, and sort music files.",
+        description="Download, clean, tag, and import music files.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("url",           nargs="?",          help="Use 'playlist' for the hardcoded main playlist, or pass a YouTube URL")
@@ -1392,7 +1472,7 @@ def main():
     parser.add_argument("--skip-crop",   action="store_true", help="Skip cover art cropping")
     parser.add_argument("--skip-tag",    action="store_true", help="Skip genre tagging")
     parser.add_argument("--skip-lyrics", action="store_true", help="Skip lyrics fetching")
-    parser.add_argument("--skip-sort",   action="store_true", help="Skip sorting into folders")
+    parser.add_argument("--skip-sort",   action="store_true", help="Skip final sort/import")
     parser.add_argument("--verbose",     action="store_true", help="Show Last.fm tag details per file")
     parser.add_argument("--force",       action="store_true", help="Re-tag files that already have a genre")
     parser.add_argument("--no-cookies",  action="store_true", help="Do not pass Chromium cookies to yt-dlp")
@@ -1494,8 +1574,8 @@ def main():
         )
 
         if results and not args.dry_run:
-            log_json = LOG_DIR / "download-log.json"
-            log_txt  = LOG_DIR / "download-log.txt"
+            log_json = LOG_DIR / ".download-log.json"
+            log_txt  = LOG_DIR / ".download-log.txt"
             with open(log_json, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
             with open(log_txt, "w", encoding="utf-8") as f:
@@ -1541,27 +1621,39 @@ def main():
         if _stopping:
             sys.exit(130)
 
-    # Step 6: Sort into genre folders (requires tagging)
+    # Step 6: Linux sorts into genre folders; macOS sends completed files to Music.
     if not args.skip_sort:
-        print("── Sort Files " + "─" * 36)
-        if not file_genres:
-            print("  Sort skipped (no tagging results)\n")
-        else:
-            moved, skipped, sort_errors = sort_files(file_genres, dry_run=args.dry_run)
+        if sys.platform == "darwin":
+            print("── Import to Apple Music " + "─" * 25)
+            moved, skipped, import_errors = import_to_apple_music(files, dry_run=args.dry_run)
             if args.dry_run:
                 print("  (dry run — no files moved)")
             else:
-                for genre in _DISPLAY_ORDER:
-                    c = moved.get(genre, 0)
-                    if c:
-                        print(f"  {genre:<15} {c:>5} moved")
-                for key in sorted(moved):
-                    if key not in PRIORITY and key != "Misc":
-                        print(f"  {key:<30} {moved[key]:>5} moved")
+                print(f"  Moved to Apple Music auto-import: {moved}")
                 if skipped:
-                    print(f"  Already in correct folder: {skipped}")
-                for err in sort_errors:
+                    print(f"  Already in auto-import folder: {skipped}")
+                for err in import_errors:
                     print(f"  {err}")
+        else:
+            print("── Sort Files " + "─" * 36)
+            if not file_genres:
+                print("  Sort skipped (no tagging results)\n")
+            else:
+                moved, skipped, sort_errors = sort_files(file_genres, dry_run=args.dry_run)
+                if args.dry_run:
+                    print("  (dry run — no files moved)")
+                else:
+                    for genre in _DISPLAY_ORDER:
+                        c = moved.get(genre, 0)
+                        if c:
+                            print(f"  {genre:<15} {c:>5} moved")
+                    for key in sorted(moved):
+                        if key not in PRIORITY and key != "Misc":
+                            print(f"  {key:<30} {moved[key]:>5} moved")
+                    if skipped:
+                        print(f"  Already in correct folder: {skipped}")
+                    for err in sort_errors:
+                        print(f"  {err}")
 
 
 if __name__ == "__main__":
