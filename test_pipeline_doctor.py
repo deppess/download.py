@@ -13,9 +13,8 @@ class ConfigurationTests(unittest.TestCase):
             config = Path(directory) / "config.toml"
             config.write_text('[paths]\nroot = "~/Example Music"\n', encoding="utf-8")
             with patch.dict(os.environ, {"DOWNLOAD_CONFIG": str(config)}, clear=False):
-                with patch.dict(os.environ, {}, clear=False):
-                    os.environ.pop("DOWNLOAD_MUSIC_ROOT", None)
-                    paths = music_paths.load_paths()
+                os.environ.pop("DOWNLOAD_MUSIC_ROOT", None)
+                paths = music_paths.load_paths()
             self.assertEqual(paths.root, Path.home() / "Example Music")
 
     def test_environment_root_has_precedence_over_toml(self):

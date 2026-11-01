@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 import pipeline_state
+from library_safety import SafetyError
 from pipeline_workflow import (
     approve_plan,
     approve_review_item,
@@ -34,7 +35,7 @@ class WorkflowPlanTests(unittest.TestCase):
             self.assertEqual(len(document["items"]), 1)
             self.assertEqual(approve_plan(state, plan), 1)
             plan.write_text(plan.read_text().replace("Electronic", "Pop"), encoding="utf-8")
-            with self.assertRaises(Exception):
+            with self.assertRaises(SafetyError):
                 load_plan(plan)
             self.assertTrue(result["plan_id"])
 

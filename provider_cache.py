@@ -34,8 +34,7 @@ class CacheEntry:
     def retry_due(self) -> bool:
         """Whether a transient failure may be requested again."""
         return bool(
-            self.retry_after_at
-            and datetime.fromisoformat(self.retry_after_at) <= datetime.now(UTC)
+            self.retry_after_at and datetime.fromisoformat(self.retry_after_at) <= datetime.now(UTC)
         )
 
 

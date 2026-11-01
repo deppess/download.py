@@ -64,10 +64,10 @@ COOKIE_BROWSER = "chromium:Profile 1"
 macOS defaults to:
 
 ```python
-MUSIC_DIR = Path("/Users/deppes/Music")
+MUSIC_DIR = Path.home() / "Music"
 LANDING_DIR = MUSIC_DIR / "download-staging"
 LIBRARY_DIR = MUSIC_DIR / "Library"
-COOKIE_BROWSER = "chromium:/Users/deppes/Library/Application Support/net.imput.helium/Default"
+COOKIE_BROWSER = f"chromium:{Path.home()}/Library/Application Support/net.imput.helium/Default"
 ```
 
 Last.fm genre tagging requires `~/.config/genre-tagger.cfg`:

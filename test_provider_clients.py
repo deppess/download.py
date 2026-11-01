@@ -85,7 +85,9 @@ class ProviderClientTests(unittest.TestCase):
     def test_lastfm_requires_an_explicit_or_environment_key(self):
         with tempfile.TemporaryDirectory() as directory:
             db = pipeline_state.connect(Path(directory) / "state.sqlite3")
-            with patch.dict("os.environ", {"LASTFM_API_KEY": ""}):
-                with self.assertRaises(ProviderConfigurationError):
-                    LastFMClient(db, api_key="")
+            with (
+                patch.dict("os.environ", {"LASTFM_API_KEY": ""}),
+                self.assertRaises(ProviderConfigurationError),
+            ):
+                LastFMClient(db, api_key="")
             db.close()

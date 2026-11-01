@@ -90,7 +90,7 @@ DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiq
 
 if sys.platform == "darwin":
     # Helium is Chromium-based, but yt-dlp does not support `helium:` by name.
-    COOKIE_BROWSER = "chromium:/Users/deppes/Library/Application Support/net.imput.helium/Default"
+    COOKIE_BROWSER = f"chromium:{Path.home()}/Library/Application Support/net.imput.helium/Default"
 else:
     # yt-dlp cookie source verified from: ~/.config/chromium/Profile 1/Cookies
     COOKIE_BROWSER = "chromium:Profile 1"
@@ -1422,6 +1422,7 @@ def preflight_youtube(url, use_cookies=True, po_token=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        check=False,
         errors="replace",
     )
     output = result.stdout or ""
@@ -2103,7 +2104,6 @@ def legacy_main(argv=None):
         sys.exit(130)
 
     # Step 4: Tag genres
-    file_genres = []
     if not args.skip_tag:
         if not CONFIG_FILE.exists() or not config.has_option("lastfm", "api_key"):
             print(f"Error: config not found or missing [lastfm] api_key at {CONFIG_FILE}")
@@ -2113,7 +2113,7 @@ def legacy_main(argv=None):
         network = pylast.LastFMNetwork(api_key=config["lastfm"]["api_key"])
 
         print("── Tag Genres " + "─" * 36)
-        results, counts, file_genres = tag_files(
+        results, counts, _ = tag_files(
             files,
             network,
             dry_run=args.dry_run,

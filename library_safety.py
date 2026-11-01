@@ -232,7 +232,7 @@ def create_backup(
                 raise SafetyError(f"Music database does not exist: {music_database}")
             count, size = _copy_package(music_database, destination / music_database.name)
             print(f"  Backed up Music database: {count} files, {size / 1024**2:.1f} MiB")
-    except Exception:
+    except Exception:  # noqa: TRY203
         # Deliberately leave partial backup data in place for inspection. Never
         # remove data after a failure, and never touch the source library.
         raise
