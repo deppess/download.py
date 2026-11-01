@@ -112,4 +112,4 @@ If YouTube bot detection triggers, the preflight prints actionable fix options i
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+All rights reserved. Published for viewing only: no copying, use, modification, distribution or sale without written permission. See [LICENSE](LICENSE).
