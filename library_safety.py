@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 try:
@@ -117,7 +117,7 @@ def write_manifest(root: Path, records: list[dict], destination: Path | None = N
         os.fsync(handle.fileno())
     temporary.replace(manifest)
     meta = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "source_root": str(root),
         "file_count": len(records),
         "total_bytes": sum(record["size"] for record in records),

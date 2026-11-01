@@ -1,10 +1,10 @@
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import provider_cache
 import pipeline_state
+import provider_cache
 
 
 class ProviderCacheTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class ProviderCacheTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             db = pipeline_state.connect(Path(directory) / "state.sqlite3")
             key = provider_cache.request_key({"artist": "A"})
-            future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+            future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
             provider_cache.put(db, "lastfm", "artist", key, "ok", "{}", expires_at=future)
             provider_cache.put(db, "lastfm", "artist", key, "ok", "{}", expires_at=future)
             db.commit()
@@ -39,7 +39,7 @@ class ProviderCacheTests(unittest.TestCase):
                 key,
                 "network_error",
                 None,
-                retry_after_at=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                retry_after_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
             )
             db.commit()
             entry = provider_cache.get(db, "lastfm", "artist", key)

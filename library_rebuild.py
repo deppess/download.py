@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from library_safety import (
@@ -138,7 +138,7 @@ def collect_evidence(
                         result["status"],
                         json.dumps(result.get("payload"), ensure_ascii=False),
                         result.get("error"),
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                     ),
                 )
                 db.commit()

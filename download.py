@@ -32,22 +32,22 @@ Notes:
     .failed.txt is a separate live skip-list for permanently unavailable YouTube IDs.
 """
 
-import sys
+import argparse
+import configparser
 import json
-import time
 import re
+import shlex
+import shutil
 import signal
 import subprocess
-import argparse
-import shutil
-import shlex
-import configparser
-import urllib.request
+import sys
+import time
 import urllib.parse
+import urllib.request
+from collections import defaultdict
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime
-from collections import defaultdict
 
 from music_paths import load_paths
 
@@ -1695,13 +1695,13 @@ def fetch_lyrics(files, dry_run=False):
 
         if sys.platform == "darwin" and audio.tags.get("\xa9lyr", [""])[0].strip():
             print(f"{prefix} {filepath.name}")
-            print(f"               → (skip — already embedded)\n")
+            print("               → (skip — already embedded)\n")
             skipped += 1
             continue
 
         if sys.platform != "darwin" and lrc_file.exists():
             print(f"{prefix} {filepath.name}")
-            print(f"               → (skip — already exists)\n")
+            print("               → (skip — already exists)\n")
             skipped += 1
             continue
 
@@ -1721,7 +1721,7 @@ def fetch_lyrics(files, dry_run=False):
         if not synced:
             synced = _fetch_lrclib(clean_artist(artist), title)
         if not synced:
-            print(f"               → (no synced lyrics found)\n")
+            print("               → (no synced lyrics found)\n")
             no_match += 1
             continue
 
@@ -1729,11 +1729,11 @@ def fetch_lyrics(files, dry_run=False):
             if sys.platform == "darwin":
                 plain = _plain_lyrics_from_lrc(synced)
                 if not plain:
-                    print(f"               → (no plain lyrics after cleanup)\n")
+                    print("               → (no plain lyrics after cleanup)\n")
                     no_match += 1
                     continue
                 _embed_lyrics(filepath, plain)
-                print(f"               → embedded lyrics\n")
+                print("               → embedded lyrics\n")
             else:
                 lrc_file.write_text(f"[ar:{artist}]\n[ti:{title}]\n\n{synced}\n", encoding="utf-8")
                 print(f"               → {lrc_file.name}\n")

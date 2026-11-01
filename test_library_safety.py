@@ -70,9 +70,7 @@ class LibrarySafetyTests(unittest.TestCase):
             count, size = library_safety._copy_package(source, destination)
 
             self.assertEqual((count, size), (2, len(b"database") + len(b"settings")))
-            self.assertEqual(
-                (destination / "Library.musicdb").read_bytes(), b"database"
-            )
+            self.assertEqual((destination / "Library.musicdb").read_bytes(), b"database")
             self.assertEqual(
                 (destination / "nested" / "preferences.plist").read_bytes(), b"settings"
             )

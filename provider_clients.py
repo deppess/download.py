@@ -12,9 +12,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import provider_cache
 
@@ -54,7 +55,7 @@ class ProviderResponse:
 
 
 def _timestamp_after(seconds: int) -> str:
-    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+    return (datetime.now(UTC) + timedelta(seconds=seconds)).isoformat()
 
 
 def _identity_key(artist: str, title: str, album: str = "") -> str:
@@ -127,7 +128,7 @@ class CachedProvider:
             key,
             "ok",
             json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            expires_at=(datetime.now(timezone.utc) + self.success_ttl).isoformat(),
+            expires_at=(datetime.now(UTC) + self.success_ttl).isoformat(),
         )
         self.db.commit()
         return ProviderResponse("ok", payload, False)
@@ -160,7 +161,7 @@ class CachedProvider:
             "not_found",
             None,
             str(error),
-            expires_at=(datetime.now(timezone.utc) + self.success_ttl).isoformat(),
+            expires_at=(datetime.now(UTC) + self.success_ttl).isoformat(),
         )
         self.db.commit()
         return ProviderResponse("not_found", None, False, str(error))

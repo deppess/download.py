@@ -9,7 +9,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from library_safety import SafetyError, atomic_verified_copy, inspect_file, sha256
+from library_safety import SafetyError, atomic_verified_copy, inspect_file
 from music_paths import load_paths
 from pipeline_state import connect, upsert_source, writer_lock
 

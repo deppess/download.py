@@ -6,7 +6,7 @@ import contextlib
 import fcntl
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from library_safety import SafetyError, load_manifest, verify_manifest
@@ -16,7 +16,7 @@ SCHEMA_VERSION = 4
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def connect(state_file: Path | None = None) -> sqlite3.Connection:

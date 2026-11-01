@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pipeline_state import utc_now
 
@@ -27,7 +27,7 @@ class CacheEntry:
         if self.retry_after_at:
             return False
         return self.expires_at is None or datetime.fromisoformat(self.expires_at) > datetime.now(
-            timezone.utc
+            UTC
         )
 
     @property
@@ -35,7 +35,7 @@ class CacheEntry:
         """Whether a transient failure may be requested again."""
         return bool(
             self.retry_after_at
-            and datetime.fromisoformat(self.retry_after_at) <= datetime.now(timezone.utc)
+            and datetime.fromisoformat(self.retry_after_at) <= datetime.now(UTC)
         )
 
 

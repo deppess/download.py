@@ -1,10 +1,9 @@
 import json
 import tempfile
 import unittest
-import urllib.error
-from unittest.mock import patch
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pipeline_state
 import provider_cache
@@ -39,7 +38,7 @@ class ProviderClientTests(unittest.TestCase):
                 key,
                 "ok",
                 '{"toptags":{"tag":[]}}',
-                expires_at=(datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                expires_at=(datetime.now(UTC) + timedelta(days=1)).isoformat(),
             )
             db.commit()
             client = LastFMClient(
