@@ -270,6 +270,14 @@ is intentionally never an automatic side effect of downloading.
 
 `.failed.txt` IDs are also written into `.downloaded.txt` so yt-dlp skips permanently unavailable videos on future runs.
 
+## Build and test
+
+Requires Python 3.11 or later and the packages under Dependencies, plus pytest.
+
+```sh
+python3 -m pytest -q
+```
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
