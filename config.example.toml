@@ -1,0 +1,25 @@
+# Copy to ~/.config/download.py/config.toml to override defaults.
+# Secrets belong in environment variables or the Keychain, never in this file.
+
+[paths]
+# root = "~/Music"
+
+[youtube]
+# cookie_browser = "chromium:/path/to/profile"
+# po_token_env = "YOUTUBE_PO_TOKEN"
+
+[lastfm]
+# api_key_env = "LASTFM_API_KEY"
+# request_interval_seconds = 0.5
+
+[lrclib]
+# user_agent = "download.py/2"
+# request_interval_seconds = 0.5
+
+[processing]
+# normalize_artwork = false
+# embed_lyrics = true
+
+[apple_music]
+# automatic_import = false
+# copy_files_to_media_folder = false

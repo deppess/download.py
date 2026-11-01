@@ -1,14 +1,14 @@
 #!/opt/local/bin/python3.13
 """
-download.py — Download, clean, tag, and import music files.
+download.py — Download and safely prepare music files for review.
 
-Pipeline (all steps run by default):
+Pipeline (all processing happens in staging by default):
   1. Download    yt-dlp → landing/staging dir (requires URL)
   2. Crop        Center-crop embedded cover art to 1:1
   3. Clean       Strip 4-digit index and '- Topic' from filenames
-  4. Tag         Last.fm genre lookup → genre buckets
+  4. Tag         Last.fm lookup; only high-confidence tags are written
   5. Lyrics      Fetch lyrics from LRCLIB
-  6. Sort/Import Linux: genre folders; macOS: Apple Music auto-import
+  6. Handoff     Keep files in staging for reviewed, verified placement
 
 Usage:
     download playlist                    Sync the hardcoded main playlist
@@ -19,7 +19,7 @@ Usage:
     --skip-crop    Skip cover art cropping
     --skip-tag     Skip genre tagging
     --skip-lyrics  Skip lyrics fetching
-    --skip-sort    Skip final sort/import
+    --skip-sort    Skip final staging-handoff message
     --dry-run      Preview all changes without modifying files
     --verbose      Show Last.fm tag details per file
     --force        Re-tag files that already have a valid genre
@@ -49,6 +49,8 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
 
+from music_paths import load_paths
+
 try:
     import pylast
 except ImportError:
@@ -70,21 +72,18 @@ except ImportError:
 
 # ── Config ───────────────────────────────────────────────────────────────
 
-if sys.platform == "darwin":
-    MUSIC_DIR = Path("/Users/deppes/Music")
-    LANDING_DIR = MUSIC_DIR / "download-staging"
-    APPLE_MUSIC_AUTO_ADD_DIR = MUSIC_DIR / "Music" / "Media.localized" / "Automatically Add to Music.localized"
-else:
-    MUSIC_DIR = Path("/home/deppes/Media/music")
-    LANDING_DIR = MUSIC_DIR / "playlists" / "000-Landing"
-    APPLE_MUSIC_AUTO_ADD_DIR = None
-
-PLAYLISTS_DIR  = MUSIC_DIR / "playlists"
-LYRICS_DIR     = MUSIC_DIR / "lyrics"
-ARCHIVE_FILE   = MUSIC_DIR / ".downloaded.txt"
-FAILED_FILE    = MUSIC_DIR / ".failed.txt"
-CONFIG_FILE    = Path.home() / ".config" / "genre-tagger.cfg"
-LOG_DIR        = MUSIC_DIR
+PATHS = load_paths()
+MUSIC_DIR = PATHS.root
+LIBRARY_DIR = PATHS.library
+LANDING_DIR = PATHS.landing
+INCOMING_DIR = LANDING_DIR / "incoming"
+STATE_DIR = PATHS.state
+PLAYLISTS_DIR = MUSIC_DIR / "playlists"
+LYRICS_DIR = PATHS.lyrics
+ARCHIVE_FILE = PATHS.archive
+FAILED_FILE = PATHS.failed
+CONFIG_FILE = Path.home() / ".config" / "genre-tagger.cfg"
+LOG_DIR = MUSIC_DIR
 
 # Main library playlist. Bare `download` intentionally does not use this; run `download playlist`.
 DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
@@ -105,241 +104,569 @@ NOTIFY_APP = "download"
 # ── Collections (keyword → sort folder override) ──────────────────────────
 
 COLLECTIONS = {
-    "initial d":           {"folder": "Soundtracks/Initial D",           "genre": "Electronic"},
-    "initiald":            {"folder": "Soundtracks/Initial D",           "genre": "Electronic"},
-    "jet set radio":       {"folder": "Soundtracks/Jet Set Radio",       "genre": "Electronic"},
-    "bomb rush cyberfunk": {"folder": "Soundtracks/Bomb Rush Cyberfunk", "genre": "Electronic"},
+    "initial d": {"folder": "Soundtracks/Initial D", "genre": "Electronic"},
+    "initiald": {"folder": "Soundtracks/Initial D", "genre": "Electronic"},
+    "jet set radio": {"folder": "Soundtracks/Jet Set Radio", "genre": "Electronic"},
+    "bomb rush cyberfunk": {
+        "folder": "Soundtracks/Bomb Rush Cyberfunk",
+        "genre": "Electronic",
+    },
 }
 
 # ── Keyword genre fallback (last resort when all API lookups fail) ─────────
 
 KEYWORD_GENRES = {
-    "Electronic": ["eurobeat", "super eurobeat", "para para", "parapara",
-                   "d & b", "d&b", "dnb", "drum and bass", "drum & bass"],
-    "Hip Hop":    ["type beat"],
+    "Electronic": [
+        "eurobeat",
+        "super eurobeat",
+        "para para",
+        "parapara",
+        "d & b",
+        "d&b",
+        "dnb",
+        "drum and bass",
+        "drum & bass",
+    ],
+    "Hip Hop": ["type beat"],
 }
 
 # ── Genre buckets ─────────────────────────────────────────────────────────
 
 GENRE_TAGS = {
     "Hip Hop": {
-        "hip-hop", "hip hop", "rap", "hiphop", "hip hop/rap",
-        "gangsta rap", "underground hip-hop", "underground hip hop",
-        "east coast hip-hop", "east coast hip hop",
-        "west coast hip-hop", "west coast hip hop",
-        "southern hip hop", "southern hip-hop",
-        "midwest hip hop", "midwest hip-hop",
-        "old school hip-hop", "old school hip hop",
-        "golden age hip-hop", "golden age hip hop",
-        "boom bap", "boombap",
-        "conscious hip-hop", "conscious hip hop", "conscious rap",
-        "alternative hip-hop", "alternative hip hop",
-        "jazz rap", "jazz hip-hop", "jazz hip hop",
-        "abstract hip-hop", "abstract hip hop",
-        "turntablism", "turntablist",
-        "hardcore hip-hop", "hardcore hip hop", "hardcore rap",
-        "dirty south", "crunk",
-        "trap", "trap music", "trap rap",
-        "cloud rap", "soundcloud rap",
-        "phonk", "drift phonk", "memphis phonk", "brazilian phonk",
+        "hip-hop",
+        "hip hop",
+        "rap",
+        "hiphop",
+        "hip hop/rap",
+        "gangsta rap",
+        "underground hip-hop",
+        "underground hip hop",
+        "east coast hip-hop",
+        "east coast hip hop",
+        "west coast hip-hop",
+        "west coast hip hop",
+        "southern hip hop",
+        "southern hip-hop",
+        "midwest hip hop",
+        "midwest hip-hop",
+        "old school hip-hop",
+        "old school hip hop",
+        "golden age hip-hop",
+        "golden age hip hop",
+        "boom bap",
+        "boombap",
+        "conscious hip-hop",
+        "conscious hip hop",
+        "conscious rap",
+        "alternative hip-hop",
+        "alternative hip hop",
+        "jazz rap",
+        "jazz hip-hop",
+        "jazz hip hop",
+        "abstract hip-hop",
+        "abstract hip hop",
+        "turntablism",
+        "turntablist",
+        "hardcore hip-hop",
+        "hardcore hip hop",
+        "hardcore rap",
+        "dirty south",
+        "crunk",
+        "trap",
+        "trap music",
+        "trap rap",
+        "cloud rap",
+        "soundcloud rap",
+        "phonk",
+        "drift phonk",
+        "memphis phonk",
+        "brazilian phonk",
         "memphis rap",
-        "drill", "uk drill", "chicago drill",
-        "grime", "grime music",
+        "drill",
+        "uk drill",
+        "chicago drill",
+        "grime",
+        "grime music",
         "g-funk",
         "horrorcore",
-        "nerdcore", "nerdcore hip-hop",
-        "chopped and screwed", "chopped & screwed",
-        "instrumental hip-hop", "instrumental hip hop",
-        "lofi hip hop", "lo-fi hip hop",
-        "plugg", "pluggnb",
-        "uk hip-hop", "uk hip hop", "british hip-hop", "british hip hop",
-        "french hip-hop", "french hip hop", "french rap", "rap francais",
-        "german hip-hop", "german hip hop", "german rap", "deutsch rap", "deutschrap",
-        "russian hip-hop", "russian hip hop", "russian rap",
-        "latin hip hop", "latin rap", "reggaeton",
-        "australian hip-hop", "australian hip hop",
-        "japanese hip hop", "japanese hip-hop",
+        "nerdcore",
+        "nerdcore hip-hop",
+        "chopped and screwed",
+        "chopped & screwed",
+        "instrumental hip-hop",
+        "instrumental hip hop",
+        "lofi hip hop",
+        "lo-fi hip hop",
+        "plugg",
+        "pluggnb",
+        "uk hip-hop",
+        "uk hip hop",
+        "british hip-hop",
+        "british hip hop",
+        "french hip-hop",
+        "french hip hop",
+        "french rap",
+        "rap francais",
+        "german hip-hop",
+        "german hip hop",
+        "german rap",
+        "deutsch rap",
+        "deutschrap",
+        "russian hip-hop",
+        "russian hip hop",
+        "russian rap",
+        "latin hip hop",
+        "latin rap",
+        "reggaeton",
+        "australian hip-hop",
+        "australian hip hop",
+        "japanese hip hop",
+        "japanese hip-hop",
     },
-
     "Rock & Metal": {
-        "rock", "hard rock", "classic rock", "rock and roll", "rock & roll",
-        "alternative rock", "alt-rock", "alt rock", "indie rock",
-        "punk rock", "punk", "pop punk", "hardcore punk", "post-punk",
-        "garage rock", "garage", "garage punk",
-        "psychedelic rock", "psychedelic", "psych rock", "acid rock",
-        "progressive rock", "prog rock", "art rock",
-        "southern rock", "country rock", "heartland rock",
-        "blues rock", "blues-rock",
-        "folk rock", "folk-rock",
-        "surf rock", "surf",
-        "grunge", "seattle",
-        "post-rock", "post rock",
-        "noise rock", "noise",
-        "stoner rock", "stoner metal", "doom", "sludge",
+        "rock",
+        "hard rock",
+        "classic rock",
+        "rock and roll",
+        "rock & roll",
+        "alternative rock",
+        "alt-rock",
+        "alt rock",
+        "indie rock",
+        "punk rock",
+        "punk",
+        "pop punk",
+        "hardcore punk",
+        "post-punk",
+        "garage rock",
+        "garage",
+        "garage punk",
+        "psychedelic rock",
+        "psychedelic",
+        "psych rock",
+        "acid rock",
+        "progressive rock",
+        "prog rock",
+        "art rock",
+        "southern rock",
+        "country rock",
+        "heartland rock",
+        "blues rock",
+        "blues-rock",
+        "folk rock",
+        "folk-rock",
+        "surf rock",
+        "surf",
+        "grunge",
+        "seattle",
+        "post-rock",
+        "post rock",
+        "noise rock",
+        "noise",
+        "stoner rock",
+        "stoner metal",
+        "doom",
+        "sludge",
         "shoegaze",
-        "emo", "emo rock", "screamo", "skramz",
+        "emo",
+        "emo rock",
+        "screamo",
+        "skramz",
         "math rock",
-        "new wave", "no wave",
+        "new wave",
+        "no wave",
         "power pop",
-        "britpop", "brit pop",
-        "glam rock", "glam",
-        "rockabilly", "psychobilly",
-        "metal", "heavy metal",
-        "thrash metal", "thrash",
-        "death metal", "melodic death metal", "technical death metal",
-        "black metal", "atmospheric black metal", "symphonic black metal",
-        "doom metal", "funeral doom", "death-doom",
-        "power metal", "symphonic metal",
-        "progressive metal", "prog metal",
-        "nu metal", "nu-metal", "rap metal", "rap rock",
-        "metalcore", "deathcore", "mathcore",
+        "britpop",
+        "brit pop",
+        "glam rock",
+        "glam",
+        "rockabilly",
+        "psychobilly",
+        "metal",
+        "heavy metal",
+        "thrash metal",
+        "thrash",
+        "death metal",
+        "melodic death metal",
+        "technical death metal",
+        "black metal",
+        "atmospheric black metal",
+        "symphonic black metal",
+        "doom metal",
+        "funeral doom",
+        "death-doom",
+        "power metal",
+        "symphonic metal",
+        "progressive metal",
+        "prog metal",
+        "nu metal",
+        "nu-metal",
+        "rap metal",
+        "rap rock",
+        "metalcore",
+        "deathcore",
+        "mathcore",
         "groove metal",
         "speed metal",
-        "industrial metal", "industrial rock", "industrial",
-        "gothic metal", "gothic rock", "goth",
-        "folk metal", "viking metal", "pagan metal",
+        "industrial metal",
+        "industrial rock",
+        "industrial",
+        "gothic metal",
+        "gothic rock",
+        "goth",
+        "folk metal",
+        "viking metal",
+        "pagan metal",
         "sludge metal",
-        "grindcore", "goregrind", "crust punk",
+        "grindcore",
+        "goregrind",
+        "crust punk",
         "nwobhm",
         "djent",
-        "post-metal", "post metal",
+        "post-metal",
+        "post metal",
         "crossover thrash",
-        "hair metal", "glam metal",
-        "hardcore", "beatdown hardcore", "melodic hardcore",
-        "ska", "ska punk", "reggae rock",
+        "hair metal",
+        "glam metal",
+        "hardcore",
+        "beatdown hardcore",
+        "melodic hardcore",
+        "ska",
+        "ska punk",
+        "reggae rock",
         "pop rock",
     },
-
     "Soul": {
-        "trip-hop", "trip hop", "triphop",
-        "downtempo", "chill-out", "chillout", "chill out",
-        "lounge", "lounge music",
-        "nu jazz", "nu-jazz", "acid jazz", "jazz-funk", "jazz funk",
-        "jazz", "smooth jazz", "cool jazz", "jazz fusion",
-        "bossa nova", "latin jazz", "afro-cuban jazz",
-        "neo-soul", "neo soul", "new soul",
-        "soul", "motown", "northern soul", "southern soul",
-        "r&b", "rnb", "rhythm and blues", "contemporary r&b",
-        "funk", "deep funk", "p-funk",
-        "reggae", "dub", "roots reggae", "dancehall", "lovers rock",
-        "afrobeat", "afrobeats", "afro",
-        "world music", "world", "worldbeat",
-        "latin", "salsa", "cumbia", "bachata",
-        "mpb", "brazilian",
-        "flamenco", "fado",
-        "indian classical", "bollywood", "bhangra",
-        "middle eastern", "arabic",
-        "african", "highlife", "afropop",
-        "classical", "orchestral", "opera", "baroque", "romantic",
-        "ambient", "dark ambient", "drone",
+        "trip-hop",
+        "trip hop",
+        "triphop",
+        "downtempo",
+        "chill-out",
+        "chillout",
+        "chill out",
+        "lounge",
+        "lounge music",
+        "nu jazz",
+        "nu-jazz",
+        "acid jazz",
+        "jazz-funk",
+        "jazz funk",
+        "jazz",
+        "smooth jazz",
+        "cool jazz",
+        "jazz fusion",
+        "bossa nova",
+        "latin jazz",
+        "afro-cuban jazz",
+        "neo-soul",
+        "neo soul",
+        "new soul",
+        "soul",
+        "motown",
+        "northern soul",
+        "southern soul",
+        "r&b",
+        "rnb",
+        "rhythm and blues",
+        "contemporary r&b",
+        "funk",
+        "deep funk",
+        "p-funk",
+        "reggae",
+        "dub",
+        "roots reggae",
+        "dancehall",
+        "lovers rock",
+        "afrobeat",
+        "afrobeats",
+        "afro",
+        "world music",
+        "world",
+        "worldbeat",
+        "latin",
+        "salsa",
+        "cumbia",
+        "bachata",
+        "mpb",
+        "brazilian",
+        "flamenco",
+        "fado",
+        "indian classical",
+        "bollywood",
+        "bhangra",
+        "middle eastern",
+        "arabic",
+        "african",
+        "highlife",
+        "afropop",
+        "classical",
+        "orchestral",
+        "opera",
+        "baroque",
+        "romantic",
+        "ambient",
+        "dark ambient",
+        "drone",
         "new age",
-        "gospel", "spiritual",
-        "blues", "delta blues", "chicago blues", "electric blues",
-        "country", "bluegrass", "americana",
+        "gospel",
+        "spiritual",
+        "blues",
+        "delta blues",
+        "chicago blues",
+        "electric blues",
+        "country",
+        "bluegrass",
+        "americana",
     },
-
     "Electronic": {
-        "electronic", "electronica",
-        "edm", "dance", "dance music",
-        "house", "deep house", "tech house", "progressive house",
-        "acid house", "funky house", "electro house", "french house",
-        "minimal house", "minimal techno", "minimal",
-        "future house", "future bass", "future garage",
-        "garage", "uk garage", "speed garage", "2-step",
-        "techno", "detroit techno", "acid techno", "hard techno",
-        "trance", "psytrance", "goa trance", "uplifting trance",
-        "progressive trance", "vocal trance",
-        "hardstyle", "hardcore", "happy hardcore", "gabber",
-        "dubstep", "brostep", "riddim", "melodic dubstep",
-        "electro", "electro-funk", "electro funk",
-        "synthwave", "retrowave", "outrun", "darksynth",
-        "synthpop", "synth-pop", "synth pop", "electropop",
-        "new wave", "darkwave", "coldwave",
-        "italo disco", "italo-disco", "euro disco", "eurobeat",
-        "hi-nrg", "hi nrg", "high energy",
-        "disco", "nu-disco", "nu disco", "disco house",
-        "eurodance", "euro dance", "hands up",
+        "electronic",
+        "electronica",
+        "edm",
+        "dance",
+        "dance music",
+        "house",
+        "deep house",
+        "tech house",
+        "progressive house",
+        "acid house",
+        "funky house",
+        "electro house",
+        "french house",
+        "minimal house",
+        "minimal techno",
+        "minimal",
+        "future house",
+        "future bass",
+        "future garage",
+        "garage",
+        "uk garage",
+        "speed garage",
+        "2-step",
+        "techno",
+        "detroit techno",
+        "acid techno",
+        "hard techno",
+        "trance",
+        "psytrance",
+        "goa trance",
+        "uplifting trance",
+        "progressive trance",
+        "vocal trance",
+        "hardstyle",
+        "hardcore",
+        "happy hardcore",
+        "gabber",
+        "dubstep",
+        "brostep",
+        "riddim",
+        "melodic dubstep",
+        "electro",
+        "electro-funk",
+        "electro funk",
+        "synthwave",
+        "retrowave",
+        "outrun",
+        "darksynth",
+        "synthpop",
+        "synth-pop",
+        "synth pop",
+        "electropop",
+        "new wave",
+        "darkwave",
+        "coldwave",
+        "italo disco",
+        "italo-disco",
+        "euro disco",
+        "eurobeat",
+        "hi-nrg",
+        "hi nrg",
+        "high energy",
+        "disco",
+        "nu-disco",
+        "nu disco",
+        "disco house",
+        "eurodance",
+        "euro dance",
+        "hands up",
         "big beat",
-        "breakbeat", "breaks", "nu skool breaks",
-        "uk bass", "bass music", "bassline",
-        "jungle", "ragga jungle", "darkside jungle",
-        "drum and bass", "drum & bass", "dnb", "d&b", "d & b",
-        "liquid dnb", "liquid drum and bass", "liquid funk",
-        "neurofunk", "neuro", "techstep",
-        "jump up", "jump-up",
-        "darkstep", "crossbreed",
-        "drumfunk", "drill and bass", "drill n bass",
-        "intelligent dnb", "atmospheric dnb",
-        "breakcore", "digital hardcore",
-        "idm", "intelligent dance music",
-        "glitch", "glitch hop", "wonky",
-        "experimental electronic", "experimental",
-        "noise", "power electronics", "harsh noise",
-        "vaporwave", "future funk", "mallsoft",
-        "chiptune", "8-bit", "chip music", "bitpop",
-        "lo-fi", "lo fi", "lofi",
-        "ambient", "dark ambient", "ambient techno",
-        "downtempo", "chill-out", "chillout", "chill",
-        "trip-hop", "trip hop",
-        "dub techno", "dub",
-        "industrial", "ebm", "aggrotech",
-        "witch house", "drag",
-        "footwork", "juke", "chicago juke",
+        "breakbeat",
+        "breaks",
+        "nu skool breaks",
+        "uk bass",
+        "bass music",
+        "bassline",
+        "jungle",
+        "ragga jungle",
+        "darkside jungle",
+        "drum and bass",
+        "drum & bass",
+        "dnb",
+        "d&b",
+        "d & b",
+        "liquid dnb",
+        "liquid drum and bass",
+        "liquid funk",
+        "neurofunk",
+        "neuro",
+        "techstep",
+        "jump up",
+        "jump-up",
+        "darkstep",
+        "crossbreed",
+        "drumfunk",
+        "drill and bass",
+        "drill n bass",
+        "intelligent dnb",
+        "atmospheric dnb",
+        "breakcore",
+        "digital hardcore",
+        "idm",
+        "intelligent dance music",
+        "glitch",
+        "glitch hop",
+        "wonky",
+        "experimental electronic",
+        "experimental",
+        "noise",
+        "power electronics",
+        "harsh noise",
+        "vaporwave",
+        "future funk",
+        "mallsoft",
+        "chiptune",
+        "8-bit",
+        "chip music",
+        "bitpop",
+        "lo-fi",
+        "lo fi",
+        "lofi",
+        "ambient",
+        "dark ambient",
+        "ambient techno",
+        "downtempo",
+        "chill-out",
+        "chillout",
+        "chill",
+        "trip-hop",
+        "trip hop",
+        "dub techno",
+        "dub",
+        "industrial",
+        "ebm",
+        "aggrotech",
+        "witch house",
+        "drag",
+        "footwork",
+        "juke",
+        "chicago juke",
         "jersey club",
         "baltimore club",
-        "miami bass", "booty bass",
-        "baile funk", "funk carioca",
-        "moombahton", "moombahcore",
-        "tropical house", "tropical",
-        "afro house", "tribal house",
+        "miami bass",
+        "booty bass",
+        "baile funk",
+        "funk carioca",
+        "moombahton",
+        "moombahcore",
+        "tropical house",
+        "tropical",
+        "afro house",
+        "tribal house",
         "amapiano",
-        "j-pop", "jpop", "j pop",
-        "k-pop", "kpop", "k pop",
-        "j-rock", "jrock", "j rock",
-        "anime", "anime soundtrack", "anime ost",
-        "video game music", "game music", "vgm",
-        "pop", "pop music", "art pop", "dance pop",
-        "indie", "indie pop", "indie electronic",
-        "dream pop", "ethereal",
+        "j-pop",
+        "jpop",
+        "j pop",
+        "k-pop",
+        "kpop",
+        "k pop",
+        "j-rock",
+        "jrock",
+        "j rock",
+        "anime",
+        "anime soundtrack",
+        "anime ost",
+        "video game music",
+        "game music",
+        "vgm",
+        "pop",
+        "pop music",
+        "art pop",
+        "dance pop",
+        "indie",
+        "indie pop",
+        "indie electronic",
+        "dream pop",
+        "ethereal",
         "bedroom pop",
-        "hyperpop", "hyper pop",
+        "hyperpop",
+        "hyper pop",
         "pc music",
         "nightcore",
         "denpa",
-        "super eurobeat", "para para",
+        "super eurobeat",
+        "para para",
     },
-
     "Oldies": {
-        "50s", "1950s", "fifties",
-        "60s", "1960s", "sixties",
-        "70s", "1970s", "seventies",
-        "80s", "1980s", "eighties",
-        "90s", "1990s", "nineties",
-        "oldies", "golden oldies",
-        "classic", "timeless",
-        "doo-wop", "doo wop", "doowop",
-        "early rock and roll", "early rock & roll",
-        "girl group", "girl groups",
+        "50s",
+        "1950s",
+        "fifties",
+        "60s",
+        "1960s",
+        "sixties",
+        "70s",
+        "1970s",
+        "seventies",
+        "80s",
+        "1980s",
+        "eighties",
+        "90s",
+        "1990s",
+        "nineties",
+        "oldies",
+        "golden oldies",
+        "classic",
+        "timeless",
+        "doo-wop",
+        "doo wop",
+        "doowop",
+        "early rock and roll",
+        "early rock & roll",
+        "girl group",
+        "girl groups",
         "motown",
-        "bubblegum pop", "bubblegum",
+        "bubblegum pop",
+        "bubblegum",
         "soft rock",
         "yacht rock",
         "am pop",
         "easy listening",
         "adult contemporary",
-        "standards", "great american songbook",
+        "standards",
+        "great american songbook",
         "vocal jazz",
-        "swing", "big band", "swing revival",
+        "swing",
+        "big band",
+        "swing revival",
         "crooner",
-        "country", "classic country", "outlaw country",
+        "country",
+        "classic country",
+        "outlaw country",
         "bluegrass",
-        "folk", "traditional folk", "singer-songwriter",
-        "blues", "delta blues", "chicago blues",
+        "folk",
+        "traditional folk",
+        "singer-songwriter",
+        "blues",
+        "delta blues",
+        "chicago blues",
         "rockabilly",
-        "surf", "surf rock", "surf pop",
+        "surf",
+        "surf rock",
+        "surf pop",
         "british invasion",
-        "mod", "northern soul",
-        "teen pop", "teen idol",
+        "mod",
+        "northern soul",
+        "teen pop",
+        "teen idol",
         "novelty",
         "brill building",
         "wall of sound",
@@ -347,31 +674,94 @@ GENRE_TAGS = {
     },
 }
 
-# Priority order when genre scores tie
-PRIORITY = ["Hip Hop", "Rock & Metal", "Oldies", "Soul", "Electronic"]
+# Add three standalone genres that are currently swallowed by broad buckets.
+GENRE_TAGS["Pop"] = {
+    "pop",
+    "pop music",
+    "art pop",
+    "dance pop",
+    "indie",
+    "indie pop",
+    "bedroom pop",
+    "dream pop",
+    "j-pop",
+    "jpop",
+    "j pop",
+    "k-pop",
+    "kpop",
+    "k pop",
+    "hyperpop",
+    "hyper pop",
+    "pc music",
+    "denpa",
+}
+GENRE_TAGS["Jazz"] = {
+    "jazz",
+    "smooth jazz",
+    "cool jazz",
+    "jazz fusion",
+    "nu jazz",
+    "nu-jazz",
+    "acid jazz",
+    "jazz-funk",
+    "jazz funk",
+    "bossa nova",
+    "latin jazz",
+    "afro-cuban jazz",
+    "vocal jazz",
+    "swing",
+    "big band",
+    "swing revival",
+}
+GENRE_TAGS["Classical"] = {
+    "classical",
+    "orchestral",
+    "opera",
+    "baroque",
+    "romantic",
+    "indian classical",
+}
+
+# Do not score a tag in both an old and a new genre.
+GENRE_TAGS["Electronic"] -= GENRE_TAGS["Pop"]
+GENRE_TAGS["Soul"] -= GENRE_TAGS["Jazz"] | GENRE_TAGS["Classical"]
+GENRE_TAGS["Oldies"] -= GENRE_TAGS["Jazz"]
+
+# Priority order is only used for stable display ordering.
+PRIORITY = [
+    "Hip Hop",
+    "Rock & Metal",
+    "Pop",
+    "Jazz",
+    "Classical",
+    "Oldies",
+    "Soul",
+    "Electronic",
+]
 
 # O(1) priority lookup used in sort key
 _PRIORITY_IDX = {g: i for i, g in enumerate(PRIORITY)}
 
 # Valid genre tags — anything outside this set triggers a re-tag
-VALID_GENRES = {*PRIORITY, "Misc"}
+VALID_GENRES = set(PRIORITY)  # Misc is retried on a later run.
 
 # Consistent display order for summaries
 _DISPLAY_ORDER = PRIORITY + ["Misc"]
 
 # Confidence thresholds for genre assignment
 HIGH_SCORE = 60
-HIGH_RATIO = 2.0
-LOW_SCORE  = 15
-LOW_RATIO  = 1.0
+HIGH_RATIO = 1.5
+LOW_SCORE = 20
+LOW_RATIO = 1.25
 
 # Seconds between API calls
-RATE_LIMIT   = 0.25   # Last.fm
-LRCLIB_RATE  = 0.10   # LRCLIB
+RATE_LIMIT = 0.25  # Last.fm
+LRCLIB_RATE = 0.10  # LRCLIB
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────
 
 _stopping = False
+
 
 def _handle_signal(sig, frame):
     global _stopping
@@ -379,64 +769,106 @@ def _handle_signal(sig, frame):
         _stopping = True
         print("\n  Stopping — finishing current file...", flush=True)
 
-signal.signal(signal.SIGINT,  _handle_signal)
+
+signal.signal(signal.SIGINT, _handle_signal)
 signal.signal(signal.SIGTERM, _handle_signal)
 
 # ── Artist name cleanup ────────────────────────────────────────────────────
 
 # Pre-compiled — strips YouTube channel suffixes before Last.fm lookup
-_STRIP_RES = [re.compile(p, re.IGNORECASE) for p in (
-    r'\s*-\s*topic$',
-    r'\s*official\s*channel$',
-    r'\s*official$',
-    r'^official\s+',
-    r'\s*music$',
-    r'\s*vevo$',
-    r'vevo$',
-    r'\s*tv$',
-    r'\s*hq$',
-    r'\s*records?$',
-    r'\s*entertainment$',
-    r'\s*channel$',
-)]
+_STRIP_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\s*-\s*topic$",
+        r"\s*official\s*channel$",
+        r"\s*official$",
+        r"^official\s+",
+        r"\s*music$",
+        r"\s*vevo$",
+        r"vevo$",
+        r"\s*tv$",
+        r"\s*hq$",
+        r"\s*records?$",
+        r"\s*entertainment$",
+        r"\s*channel$",
+    )
+]
+
 
 def clean_artist(name):
     """Take primary artist (first before comma) and strip YouTube channel suffixes."""
     s = name.strip()
-    if ',' in s:
-        s = s.split(',')[0].strip()
-    if ' / ' in s:
-        s = s.split(' / ')[-1].strip()
+    if "," in s:
+        s = s.split(",")[0].strip()
+    if " / " in s:
+        s = s.split(" / ")[-1].strip()
     for pat in _STRIP_RES:
-        s = pat.sub('', s).strip()
+        s = pat.sub("", s).strip()
     return s
+
 
 # ── Junk tag filter ────────────────────────────────────────────────────────
 
 _JUNK_TAG_RES = [
-    re.compile(r'^\d+\s*stars?$',       re.IGNORECASE),
-    re.compile(r'^seen live$',           re.IGNORECASE),
-    re.compile(r'^my playlist$',         re.IGNORECASE),
-    re.compile(r'^favou?rites?$',        re.IGNORECASE),
-    re.compile(r'^check out$',           re.IGNORECASE),
-    re.compile(r'^albums i own$',        re.IGNORECASE),
-    re.compile(r'^under \d+ listeners$', re.IGNORECASE),
+    re.compile(r"^\d+\s*stars?$", re.IGNORECASE),
+    re.compile(r"^seen live$", re.IGNORECASE),
+    re.compile(r"^my playlist$", re.IGNORECASE),
+    re.compile(r"^favou?rites?$", re.IGNORECASE),
+    re.compile(r"^check out$", re.IGNORECASE),
+    re.compile(r"^albums i own$", re.IGNORECASE),
+    re.compile(r"^under \d+ listeners$", re.IGNORECASE),
 ]
+
 
 def filter_junk_tags(tags):
     """Drop personal/non-genre tags from Last.fm results."""
     return [(n, w) for n, w in tags if not any(p.match(n.strip()) for p in _JUNK_TAG_RES)]
 
+
 # ── Genre scoring ──────────────────────────────────────────────────────────
 
+_AMBIGUOUS_TAGS = {
+    "ambient",
+    "chill",
+    "country",
+    "dub",
+    "garage",
+    "hardcore",
+    "industrial",
+    "lo-fi",
+    "minimal",
+    "new wave",
+    "noise",
+    "psychedelic",
+    "rockabilly",
+    "surf",
+    "world",
+}
+
+
+def _tag_owners():
+    """Build a tag → genre map, excluding ambiguous or shared tags."""
+    owners = defaultdict(set)
+    for genre, tag_set in GENRE_TAGS.items():
+        for tag in tag_set:
+            owners[tag].add(genre)
+    return {
+        tag: next(iter(genres))
+        for tag, genres in owners.items()
+        if len(genres) == 1 and tag not in _AMBIGUOUS_TAGS
+    }
+
+
+_TAG_GENRES = _tag_owners()
+
+
 def score_tags(tags):
-    """Map (tag, weight) pairs to per-bucket scores."""
+    """Map (tag, weight) pairs to one unambiguous genre bucket each."""
     scores = defaultdict(float)
     for tag_name, weight in tags:
-        t = tag_name.lower().strip()
-        for genre, tag_set in GENRE_TAGS.items():
-            if t in tag_set:
-                scores[genre] += weight
+        genre = _TAG_GENRES.get(tag_name.lower().strip())
+        if genre:
+            scores[genre] += weight
     return dict(scores)
 
 
@@ -445,10 +877,7 @@ def assign_genre(scores):
     if not scores:
         return "Misc", "misc"
 
-    sorted_scores = sorted(
-        scores.items(),
-        key=lambda x: (-x[1], _PRIORITY_IDX.get(x[0], 99))
-    )
+    sorted_scores = sorted(scores.items(), key=lambda x: (-x[1], _PRIORITY_IDX.get(x[0], 99)))
 
     winner_genre, winner_score = sorted_scores[0]
     runner_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
@@ -463,7 +892,9 @@ def assign_genre(scores):
         return winner_genre, "low"
     return "Misc", "misc"
 
+
 # ── Last.fm helpers ────────────────────────────────────────────────────────
+
 
 def get_track_tags(network, artist, title):
     """Fetch track-level tags from Last.fm."""
@@ -514,19 +945,21 @@ def search_artist_tags(network, artist, cache):
     cache[key] = []
     return []
 
+
 # ── Progressive channel name cleanup ──────────────────────────────────────
 
 _CHANNEL_SUFFIX_RES = [
-    re.compile(r'official\s*$',  re.IGNORECASE),
-    re.compile(r'music\s*$',     re.IGNORECASE),
-    re.compile(r'band\s*$',      re.IGNORECASE),
-    re.compile(r'archive\s*$',   re.IGNORECASE),
-    re.compile(r'tv\s*$',        re.IGNORECASE),
-    re.compile(r'hq\s*$',        re.IGNORECASE),
-    re.compile(r'channel\s*$',   re.IGNORECASE),
-    re.compile(r'records?\s*$',  re.IGNORECASE),
-    re.compile(r'\d+\s*$'),
+    re.compile(r"official\s*$", re.IGNORECASE),
+    re.compile(r"music\s*$", re.IGNORECASE),
+    re.compile(r"band\s*$", re.IGNORECASE),
+    re.compile(r"archive\s*$", re.IGNORECASE),
+    re.compile(r"tv\s*$", re.IGNORECASE),
+    re.compile(r"hq\s*$", re.IGNORECASE),
+    re.compile(r"channel\s*$", re.IGNORECASE),
+    re.compile(r"records?\s*$", re.IGNORECASE),
+    re.compile(r"\d+\s*$"),
 ]
+
 
 def try_channel_name_cleanup(network, artist_name, cache):
     """
@@ -535,7 +968,7 @@ def try_channel_name_cleanup(network, artist_name, cache):
     """
     name = artist_name.strip()
     for pat in _CHANNEL_SUFFIX_RES:
-        new_name = pat.sub('', name).strip()
+        new_name = pat.sub("", name).strip()
         if new_name and new_name != name and len(new_name) >= 2:
             tags = get_artist_tags(network, new_name, cache)
             if tags:
@@ -545,41 +978,45 @@ def try_channel_name_cleanup(network, artist_name, cache):
             name = new_name
     return [], None
 
+
 # ── Title cleaning ─────────────────────────────────────────────────────────
 
 _TITLE_JUNK_RES = [
-    re.compile(r'\(official\s*(video|audio|music\s*video|track|lyric\s*video)\)', re.IGNORECASE),
-    re.compile(r'\(feat\.?\s*[^)]+\)',  re.IGNORECASE),
-    re.compile(r'\(ft\.?\s*[^)]+\)',    re.IGNORECASE),
-    re.compile(r'\(with\s+[^)]+\)',     re.IGNORECASE),
-    re.compile(r'\(full\s*song\)',       re.IGNORECASE),
-    re.compile(r'\(hq\)',               re.IGNORECASE),
-    re.compile(r'\(\d{4}\)',            re.IGNORECASE),
-    re.compile(r'\(remaster(?:ed)?\)',  re.IGNORECASE),
-    re.compile(r'shot\s*by\s*.*$',      re.IGNORECASE),
-    re.compile(r'\[.*?\]'),
+    re.compile(r"\(official\s*(video|audio|music\s*video|track|lyric\s*video)\)", re.IGNORECASE),
+    re.compile(r"\(feat\.?\s*[^)]+\)", re.IGNORECASE),
+    re.compile(r"\(ft\.?\s*[^)]+\)", re.IGNORECASE),
+    re.compile(r"\(with\s+[^)]+\)", re.IGNORECASE),
+    re.compile(r"\(full\s*song\)", re.IGNORECASE),
+    re.compile(r"\(hq\)", re.IGNORECASE),
+    re.compile(r"\(\d{4}\)", re.IGNORECASE),
+    re.compile(r"\(remaster(?:ed)?\)", re.IGNORECASE),
+    re.compile(r"shot\s*by\s*.*$", re.IGNORECASE),
+    re.compile(r"\[.*?\]"),
 ]
+
 
 def clean_title(title):
     """Strip parenthetical junk from title for cleaner Last.fm searches."""
     s = title.strip()
     for pat in _TITLE_JUNK_RES:
-        s = pat.sub('', s).strip()
+        s = pat.sub("", s).strip()
     return s
 
+
 # ── Title parsing fallback ─────────────────────────────────────────────────
+
 
 def try_artist_from_title(network, title, cache):
     """
     When metadata fails, extract artist from 'Artist - Song' or 'Artist / Song' title formats.
     """
-    normalized = title.replace('⧸', '/').replace('／', '/')
+    normalized = title.replace("⧸", "/").replace("／", "/")
 
-    for sep in (' - ', ' / '):
+    for sep in (" - ", " / "):
         if sep not in normalized:
             continue
         left, right = normalized.split(sep, 1)
-        left  = left.strip()
+        left = left.strip()
         right = right.strip()
 
         if not left or len(left) < 2:
@@ -613,6 +1050,27 @@ def keyword_genre_fallback(fname, title):
     return None, None
 
 
+_CLASSICAL_HINT_RE = re.compile(
+    r"\b(requiem|symphony|concerto|sonata|cantata|oratorio|opus|op\.|"
+    r"adagio|allegro|andante|prelude|fugue|nocturne|etude)\b",
+    re.IGNORECASE,
+)
+_CLASSICAL_ARTISTS_RE = re.compile(
+    r"\b(bach|beethoven|mozart|chopin|vivaldi|tchaikovsky|debussy|handel|"
+    r"brahms|schubert|stravinsky|rachmaninoff)\b",
+    re.IGNORECASE,
+)
+
+
+def metadata_genre_hint(artist, title):
+    """Recognize only unambiguous metadata before loose artist lookup wins."""
+    if _CLASSICAL_HINT_RE.search(f"{artist} {title}") or _CLASSICAL_ARTISTS_RE.search(
+        f"{artist} {title}"
+    ):
+        return "Classical", "metadata:classical"
+    return None, None
+
+
 def artist_name_genre_match(artist_clean, artist_raw):
     """Check if the artist name itself is a known genre tag."""
     for name in (artist_clean, artist_raw):
@@ -635,8 +1093,8 @@ def get_collection(fname):
 
 # ── yt-dlp guardrails ─────────────────────────────────────────────────────
 
-_YT_ID_RE = re.compile(r'\[youtube\]\s+([A-Za-z0-9_-]{11}):')
-_YT_ID_ONLY_RE = re.compile(r'^[A-Za-z0-9_-]{11}$')
+_YT_ID_RE = re.compile(r"\[youtube\]\s+([A-Za-z0-9_-]{11}):")
+_YT_ID_ONLY_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 # Only these are treated as permanent dead/unavailable videos and written to .failed.txt.
 _PERMANENT_FAILURE_PHRASES = (
@@ -662,51 +1120,66 @@ _FATAL_STOP_PHRASES = (
     "account has been restricted",
 )
 
-_SUPPRESSED_OUTPUT_PHRASES = (
-    "does not pass filter",
-)
+_SUPPRESSED_OUTPUT_PHRASES = ("does not pass filter",)
 
 _BASE_MATCH_FILTERS = ("!is_live", "!live")
 
 _YTDLP_DOWNLOAD_ARGS = [
     # Audio-only path. Prefer native m4a when available; otherwise extract/convert.
-    "--format",               "bestaudio[ext=m4a]/bestaudio/best",
+    "--format",
+    "bestaudio[ext=m4a]/bestaudio/best",
     "--extract-audio",
-    "--audio-format",         "m4a",
-    "--audio-quality",        "0",
-
+    "--audio-format",
+    "m4a",
+    "--audio-quality",
+    "0",
     # Metadata/artwork only. Subtitles are intentionally skipped for music.
     "--embed-thumbnail",
-    "--convert-thumbnails",   "jpg",
+    "--convert-thumbnails",
+    "jpg",
     "--embed-metadata",
-
+    "--write-info-json",
+    "--no-write-playlist-metafiles",
     # yt-dlp owns .downloaded.txt exactly like before.
-    "--download-archive",     str(ARCHIVE_FILE),
-    "--output",               str(LANDING_DIR / "%(uploader)s - %(title)s.%(ext)s"),
+    "--download-archive",
+    str(ARCHIVE_FILE),
+    "--output",
+    # A stable video ID prevents filename collisions without claiming that a
+    # channel/uploader is the recording artist.
+    str(INCOMING_DIR / "%(title)s [%(id)s].%(ext)s"),
     "--ignore-errors",
     "--continue",
     "--no-overwrites",
     "--lazy-playlist",
-
     # Gentle playlist behavior.
-    "--sleep-requests",       "1.25",
-    "--sleep-interval",       "8",
-    "--max-sleep-interval",   "18",
-    "--rate-limit",           "1.5M",
-    "--throttled-rate",       "100K",
-    "--concurrent-fragments", "1",
-
+    "--sleep-requests",
+    "1.25",
+    "--sleep-interval",
+    "8",
+    "--max-sleep-interval",
+    "18",
+    "--rate-limit",
+    "1.5M",
+    "--throttled-rate",
+    "100K",
+    "--concurrent-fragments",
+    "1",
     # Finite retries with backoff instead of infinite retry loops.
-    "--retries",              "10",
-    "--fragment-retries",     "10",
-    "--extractor-retries",    "5",
-    "--retry-sleep",          "http:exp=5:60",
-    "--retry-sleep",          "fragment:exp=5:60",
-    "--retry-sleep",          "extractor:linear=10:60:10",
-
-    "--parse-metadata",       "%(uploader)s:%(meta_artist)s",
-    "--parse-metadata",       "%(title)s:%(meta_title)s",
-    "--replace-in-metadata",  "uploader", " - Topic$", "",
+    "--retries",
+    "10",
+    "--fragment-retries",
+    "10",
+    "--extractor-retries",
+    "5",
+    "--retry-sleep",
+    "http:exp=5:60",
+    "--retry-sleep",
+    "fragment:exp=5:60",
+    "--retry-sleep",
+    "extractor:linear=10:60:10",
+    # Do not remap uploader or title fields into media tags. YouTube channel
+    # names are not reliable artist identity, and identity correction belongs
+    # to the evidence/review stage rather than an irreversible download step.
 ]
 
 
@@ -833,7 +1306,16 @@ def _read_keychain_password(account, service):
 
 def _write_keychain_password(account, service, password):
     result = subprocess.run(
-        ["security", "add-generic-password", "-a", account, "-s", service, "-w", password.decode("utf-8")],
+        [
+            "security",
+            "add-generic-password",
+            "-a",
+            account,
+            "-s",
+            service,
+            "-w",
+            password.decode("utf-8"),
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
@@ -852,7 +1334,9 @@ def setup_helium_cookies():
 
     helium_key = _read_keychain_password("Helium", "Helium Storage Key")
     if not helium_key:
-        print("Error: Helium Storage Key not found in Keychain. Open Helium once and sign in to YouTube.")
+        print(
+            "Error: Helium Storage Key not found in Keychain. Open Helium once and sign in to YouTube."
+        )
         return 1
 
     chromium_key = _read_keychain_password("Chromium", "Chromium Safe Storage")
@@ -880,7 +1364,8 @@ def build_ytdlp_cmd(url, force_playlist=False, use_cookies=True, po_token=None):
         "yt-dlp",
         *playlist_args,
         *_YTDLP_DOWNLOAD_ARGS,
-        "--match-filter", _MATCH_FILTER,
+        "--match-filter",
+        _MATCH_FILTER,
         *build_cookie_args(use_cookies),
         *po_args,
         url,
@@ -997,9 +1482,10 @@ def run_ytdlp_streaming(cmd, failed_ids):
 
 # ── Download ───────────────────────────────────────────────────────────────
 
+
 def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_token=None):
     """Run yt-dlp to download a playlist or video to the landing dir."""
-    LANDING_DIR.mkdir(parents=True, exist_ok=True)
+    INCOMING_DIR.mkdir(parents=True, exist_ok=True)
     ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
     FAILED_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1013,7 +1499,7 @@ def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_toke
     )
 
     if dry_run:
-        print(f"  [dry run] yt-dlp → {LANDING_DIR}")
+        print(f"  [dry run] yt-dlp → {INCOMING_DIR}")
         print(f"  Failed IDs skipped: {len(failed_ids)} from {FAILED_FILE}")
         print("  " + shlex.join(str(part) for part in cmd))
         return
@@ -1023,7 +1509,7 @@ def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_toke
         sys.exit(1)
 
     print(f"  Failed IDs skipped: {len(failed_ids)} from {FAILED_FILE}")
-    print(f"  Downloading to {LANDING_DIR}")
+    print(f"  Downloading to {INCOMING_DIR}")
 
     result_code, fatal_seen = run_ytdlp_streaming(cmd, failed_ids)
     if result_code != 0:
@@ -1033,7 +1519,9 @@ def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_toke
         else:
             print(f"  yt-dlp exited with code {result_code} (some items may have been skipped)")
 
+
 # ── Cover crop ─────────────────────────────────────────────────────────────
+
 
 def crop_covers(files, dry_run=False):
     """Center-crop embedded cover art to a 1:1 square."""
@@ -1066,13 +1554,12 @@ def crop_covers(files, dry_run=False):
             continue
 
         if dry_run:
-            print(f"  [crop] {filepath.name[:70]} ({w}x{h} → {min(w,h)}x{min(w,h)})")
+            print(f"  [crop] {filepath.name[:70]} ({w}x{h} → {min(w, h)}x{min(w, h)})")
             fixed += 1
             continue
 
         side = min(w, h)
-        img  = img.crop(((w - side) // 2, (h - side) // 2,
-                          (w + side) // 2, (h + side) // 2))
+        img = img.crop(((w - side) // 2, (h - side) // 2, (w + side) // 2, (h + side) // 2))
 
         pil_fmt = "JPEG" if cover.imageformat == MP4Cover.FORMAT_JPEG else "PNG"
         buf = BytesIO()
@@ -1083,23 +1570,25 @@ def crop_covers(files, dry_run=False):
 
     return fixed, skipped, errors
 
+
 # ── Clean filenames ────────────────────────────────────────────────────────
 
-_RE_INDEX = re.compile(r'^\d{4} - ')
-_RE_TOPIC = re.compile(r' - Topic(?= - )')
+_RE_INDEX = re.compile(r"^\d{4} - ")
+_RE_TOPIC = re.compile(r" - Topic(?= - )")
+
 
 def clean_filenames(files, dry_run=False):
     """Strip leading 4-digit index and '- Topic' from filenames."""
     cleaned = skipped = 0
-    errors   = []
+    errors = []
     path_map = {}
 
     for filepath in files:
         if _stopping:
             break
-        fname    = filepath.name
-        new_name = _RE_INDEX.sub('', fname)
-        new_name = _RE_TOPIC.sub('', new_name)
+        fname = filepath.name
+        new_name = _RE_INDEX.sub("", fname)
+        new_name = _RE_TOPIC.sub("", new_name)
 
         if new_name == fname:
             skipped += 1
@@ -1126,24 +1615,25 @@ def clean_filenames(files, dry_run=False):
 
     return cleaned, skipped, errors, path_map
 
+
 # ── Lyrics ─────────────────────────────────────────────────────────────────
 
-LRCLIB_API   = "https://lrclib.net/api/get"
-_RE_LRC_SAFE = re.compile(r'[\\/<>|]')
-_RE_LRC_TAG  = re.compile(r"\[[a-zA-Z]+:[^\]]*\]")
+LRCLIB_API = "https://lrclib.net/api/get"
+_RE_LRC_SAFE = re.compile(r"[\\/<>|]")
+_RE_LRC_TAG = re.compile(r"\[[a-zA-Z]+:[^\]]*\]")
 _RE_LRC_TIME = re.compile(r"\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]")
 
 
 def _lrc_path(artist, title):
     """Build the .lrc file path for a given artist and title."""
-    safe = _RE_LRC_SAFE.sub('', f"{artist} - {title}")
+    safe = _RE_LRC_SAFE.sub("", f"{artist} - {title}")
     return LYRICS_DIR / f"{safe}.lrc"
 
 
 def _fetch_lrclib(artist, title):
     """Query LRCLIB for synced lyrics. Returns the LRC string or None."""
     params = urllib.parse.urlencode({"artist_name": artist, "track_name": title})
-    req    = urllib.request.Request(
+    req = urllib.request.Request(
         f"{LRCLIB_API}?{params}", headers={"User-Agent": "download.py/1.0"}
     )
     try:
@@ -1177,7 +1667,7 @@ def fetch_lyrics(files, dry_run=False):
     if sys.platform != "darwin":
         LYRICS_DIR.mkdir(parents=True, exist_ok=True)
     fetched = skipped = no_match = errors = 0
-    total   = len(files)
+    total = len(files)
 
     for idx, filepath in enumerate(files, 1):
         if _stopping:
@@ -1195,7 +1685,7 @@ def fetch_lyrics(files, dry_run=False):
             continue
 
         artist = audio.tags.get("\xa9ART", [""])[0].strip()
-        title  = audio.tags.get("\xa9nam", [""])[0].strip()
+        title = audio.tags.get("\xa9nam", [""])[0].strip()
 
         if not artist or not title:
             skipped += 1
@@ -1257,18 +1747,27 @@ def fetch_lyrics(files, dry_run=False):
 
     return fetched, skipped, no_match, errors
 
+
 # ── Genre tagging ──────────────────────────────────────────────────────────
 
-_RE_FNAME    = re.compile(r"^(.+?) - (.+)\.m4a$")
-_CONF_LABEL  = {"high": "", "low": " [low]", "misc": " [misc]"}
+_RE_FNAME = re.compile(r"^(.+?) - (.+)\.m4a$")
+_CONF_LABEL = {"high": "", "low": " [low]", "misc": " [misc]"}
 
-def tag_files(files, network, dry_run=False, verbose=False, force=False):
+
+def tag_files(
+    files,
+    network,
+    dry_run=False,
+    verbose=False,
+    force=False,
+    write_low_confidence=False,
+):
     """Tag files with a genre via Last.fm. Returns (results, counts, file_genres)."""
     artist_cache = {}
-    results      = []
-    counts       = defaultdict(int)
-    file_genres  = []
-    total        = len(files)
+    results = []
+    counts = defaultdict(int)
+    file_genres = []
+    total = len(files)
 
     for idx, filepath in enumerate(files, 1):
         if _stopping:
@@ -1297,14 +1796,14 @@ def tag_files(files, network, dry_run=False, verbose=False, force=False):
         artist_raw = title = ""
         if audio.tags:
             artist_raw = audio.tags.get("\xa9ART", [""])[0]
-            title      = audio.tags.get("\xa9nam", [""])[0]
+            title = audio.tags.get("\xa9nam", [""])[0]
         if not artist_raw or not title:
             m = _RE_FNAME.match(fname)
             if m:
                 artist_raw, title = m.group(1), m.group(2)
 
         artist_clean = clean_artist(artist_raw)
-        source       = "none"
+        source = "none"
 
         # Fallback chain: track → artist → raw artist → search → channel cleanup → title parse
         tags = get_track_tags(network, artist_clean, title)
@@ -1340,9 +1839,13 @@ def tag_files(files, network, dry_run=False, verbose=False, force=False):
         if not tags:
             kw_genre, kw_source = keyword_genre_fallback(fname, title)
 
-        tags              = filter_junk_tags(tags)
-        scores            = score_tags(tags)
-        genre, confidence = assign_genre(scores)
+        tags = filter_junk_tags(tags)
+        scores = score_tags(tags)
+        hint_genre, hint_source = metadata_genre_hint(artist_clean, title)
+        if hint_genre:
+            genre, confidence, source = hint_genre, "high", hint_source
+        else:
+            genre, confidence = assign_genre(scores)
 
         if genre == "Misc" and kw_genre:
             genre, confidence, source = kw_genre, "low", kw_source
@@ -1357,46 +1860,61 @@ def tag_files(files, network, dry_run=False, verbose=False, force=False):
         if col_genre:
             genre, confidence, source = col_genre, "high", "collection"
 
-        if not dry_run:
+        # Uncertain classifications are evidence for review, not permanent
+        # metadata. A caller can explicitly retain the legacy behavior.
+        should_write = confidence == "high" or write_low_confidence
+        if not dry_run and should_write:
             if not audio.tags:
                 audio.add_tags()
             audio.tags["\xa9gen"] = [genre]
             audio.save()
 
-        print(f"→ {genre}{_CONF_LABEL.get(confidence, '')}")
+        suffix = "" if should_write else " [review only]"
+        print(f"→ {genre}{_CONF_LABEL.get(confidence, '')}{suffix}")
 
         if verbose:
             if tags:
                 print(f"           tags:   {', '.join(f'{n}:{w}' for n, w in tags[:8])}")
-                print(f"           scores: {', '.join(f'{g}={s:.0f}' for g, s in sorted(scores.items(), key=lambda x: -x[1]))}")
+                print(
+                    f"           scores: {', '.join(f'{g}={s:.0f}' for g, s in sorted(scores.items(), key=lambda x: -x[1]))}"
+                )
             else:
                 raw_note = f" (raw: '{artist_raw}')" if artist_raw != artist_clean else ""
                 print(f"           tags:   (none) — artist='{artist_clean}'{raw_note}")
 
         counts[genre] += 1
         file_genres.append((filepath, genre))
-        results.append({
-            "num": idx, "file": fname,
-            "artist": artist_clean, "artist_raw": artist_raw,
-            "title": title, "genre": genre,
-            "confidence": confidence, "source": source,
-            "scores": scores, "tags": tags,
-        })
+        results.append(
+            {
+                "num": idx,
+                "file": fname,
+                "artist": artist_clean,
+                "artist_raw": artist_raw,
+                "title": title,
+                "genre": genre,
+                "confidence": confidence,
+                "source": source,
+                "scores": scores,
+                "tags": tags,
+            }
+        )
 
     return results, counts, file_genres
 
+
 # ── Sort ───────────────────────────────────────────────────────────────────
+
 
 def sort_files(file_genres, dry_run=False):
     """Move files into PLAYLISTS_DIR/{genre}/ or collection subfolders."""
-    moved   = defaultdict(int)
+    moved = defaultdict(int)
     skipped = 0
-    errors  = []
+    errors = []
 
     for filepath, genre in file_genres:
         if _stopping:
             break
-        col_folder   = get_collection(filepath.name)[0]
+        col_folder = get_collection(filepath.name)[0]
         folder_label = col_folder or genre
         if col_folder:
             dest_dir = PLAYLISTS_DIR / col_folder
@@ -1425,68 +1943,91 @@ def sort_files(file_genres, dry_run=False):
     return moved, skipped, errors
 
 
-def import_to_apple_music(files, dry_run=False):
-    """Move completed macOS files into Apple Music's auto-import folder."""
-    moved = skipped = 0
-    errors = []
+def finish_in_staging(files, dry_run=False):
+    """Finish safely: downloads remain in landing pending reviewed placement.
 
-    if APPLE_MUSIC_AUTO_ADD_DIR is None:
-        return moved, skipped, errors
+    Apple Music import is intentionally a separate explicit operation. This
+    prevents the application from moving files into a managed-media folder or
+    removing the only staged copy before a library plan is verified.
+    """
+    if dry_run:
+        print(f"  [handoff] {len(files)} files would remain in {LANDING_DIR}")
+    else:
+        print(f"  {len(files)} files remain in {LANDING_DIR}")
+    print("  Next: create a reviewed library plan before copying into the library.")
 
-    for filepath in files:
-        if _stopping:
-            break
-        dest = APPLE_MUSIC_AUTO_ADD_DIR / filepath.name
-
-        if filepath.parent == APPLE_MUSIC_AUTO_ADD_DIR:
-            skipped += 1
-            continue
-
-        if dry_run:
-            print(f"  [import] {filepath.name[:55]:55} → Apple Music")
-            moved += 1
-            continue
-
-        try:
-            APPLE_MUSIC_AUTO_ADD_DIR.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                errors.append(f"SKIP (exists): {filepath.name} → Apple Music auto-import")
-                continue
-            filepath.rename(dest)
-            moved += 1
-        except Exception as e:
-            errors.append(f"ERROR: {filepath.name}: {e}")
-
-    return moved, skipped, errors
 
 # ── Main ───────────────────────────────────────────────────────────────────
 
-def main():
+
+def legacy_main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Download, clean, tag, and import music files.",
+        description="Download and safely prepare music files for review.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("url",           nargs="?",          help="Use 'playlist' for the hardcoded main playlist, or pass a YouTube URL")
-    parser.add_argument("--process",     metavar="DIR",       help="Process existing files (skip download)")
-    parser.add_argument("--dry-run",     action="store_true", help="Preview changes without modifying files")
-    parser.add_argument("--skip-crop",   action="store_true", help="Skip cover art cropping")
-    parser.add_argument("--skip-tag",    action="store_true", help="Skip genre tagging")
+    parser.add_argument(
+        "url",
+        nargs="?",
+        help="Use 'playlist' for the hardcoded main playlist, or pass a YouTube URL",
+    )
+    parser.add_argument(
+        "--process", metavar="DIR", help="Deprecated in-place processor for existing files"
+    )
+    parser.add_argument(
+        "--allow-legacy-mutation",
+        action="store_true",
+        help="Required acknowledgement for the deprecated in-place processor.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Preview changes without modifying files"
+    )
+    parser.add_argument("--skip-crop", action="store_true", help="Skip cover art cropping")
+    parser.add_argument("--skip-tag", action="store_true", help="Skip genre tagging")
     parser.add_argument("--skip-lyrics", action="store_true", help="Skip lyrics fetching")
-    parser.add_argument("--skip-sort",   action="store_true", help="Skip final sort/import")
-    parser.add_argument("--verbose",     action="store_true", help="Show Last.fm tag details per file")
-    parser.add_argument("--force",       action="store_true", help="Re-tag files that already have a genre")
-    parser.add_argument("--no-cookies",  action="store_true", help="Do not pass Chromium cookies to yt-dlp")
-    parser.add_argument("--po-token",    metavar="TOKEN",     help="YouTube PO token (VISITOR_DATA+TOKEN); overrides config file")
-    parser.add_argument("--setup-helium-cookies", action="store_true", help="Create macOS Keychain alias for Helium cookies")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--skip-sort", action="store_true", help="Skip final staging handoff message"
+    )
+    parser.add_argument("--verbose", action="store_true", help="Show Last.fm tag details per file")
+    parser.add_argument(
+        "--force", action="store_true", help="Re-tag files that already have a genre"
+    )
+    parser.add_argument(
+        "--write-low-confidence-tags",
+        action="store_true",
+        help="Legacy override: write low-confidence/Misc genre guesses to files",
+    )
+    parser.add_argument(
+        "--no-cookies",
+        action="store_true",
+        help="Do not pass Chromium cookies to yt-dlp",
+    )
+    parser.add_argument(
+        "--po-token",
+        metavar="TOKEN",
+        help="YouTube PO token (VISITOR_DATA+TOKEN); overrides config file",
+    )
+    parser.add_argument(
+        "--setup-helium-cookies",
+        action="store_true",
+        help="Create macOS Keychain alias for Helium cookies",
+    )
+    args = parser.parse_args(argv)
 
     if args.setup_helium_cookies:
         sys.exit(setup_helium_cookies())
 
     if not args.url and not args.process:
-        print("Error: choose either `download playlist`, `download <url>`, or `download --process <dir>`\n")
+        print(
+            "Error: choose either `download playlist`, `download <url>`, or `download --process <dir>`\n"
+        )
         parser.print_help()
         sys.exit(1)
+    if args.process and not args.allow_legacy_mutation:
+        print(
+            "Refusing deprecated in-place processing without --allow-legacy-mutation.\n"
+            "Use `download intake` for the safe raw intake workflow."
+        )
+        sys.exit(2)
 
     if args.dry_run:
         print("DRY RUN — no files will be modified\n")
@@ -1519,7 +2060,9 @@ def main():
         print()
         if args.dry_run:
             return
-        scan_dir = LANDING_DIR
+        print("Download complete. Files remain untouched in incoming staging.")
+        print("Next: run `download intake` to checksum and preserve raw copies.\n")
+        return
     else:
         scan_dir = Path(args.process)
         if not scan_dir.is_dir():
@@ -1529,7 +2072,9 @@ def main():
     files = sorted(scan_dir.rglob("*.m4a"))
     if not files:
         if args.url:
-            print("No new .m4a files found in landing. Playlist may already be synced, or only skipped/unavailable items were hit.")
+            print(
+                "No new .m4a files found in landing. Playlist may already be synced, or only skipped/unavailable items were hit."
+            )
         else:
             print("No .m4a files found.")
         return
@@ -1569,21 +2114,34 @@ def main():
 
         print("── Tag Genres " + "─" * 36)
         results, counts, file_genres = tag_files(
-            files, network, dry_run=args.dry_run,
-            verbose=args.verbose, force=args.force,
+            files,
+            network,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            force=args.force,
+            write_low_confidence=args.write_low_confidence_tags,
         )
 
         if results and not args.dry_run:
             log_json = LOG_DIR / ".download-log.json"
-            log_txt  = LOG_DIR / ".download-log.txt"
+            log_txt = LOG_DIR / ".download-log.txt"
             with open(log_json, "w", encoding="utf-8") as f:
                 json.dump(results, f, indent=2, ensure_ascii=False)
             with open(log_txt, "w", encoding="utf-8") as f:
                 f.write(f"Download Log — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Files processed: {len(results)}\n\n")
                 for r in results:
-                    tag_str   = ", ".join(f"{n}:{w}" for n, w in r["tags"][:8]) if r["tags"] else "(none)"
-                    score_str = ", ".join(f"{g}={s:.0f}" for g, s in sorted(r["scores"].items(), key=lambda x: -x[1])) if r["scores"] else "(none)"
+                    tag_str = (
+                        ", ".join(f"{n}:{w}" for n, w in r["tags"][:8]) if r["tags"] else "(none)"
+                    )
+                    score_str = (
+                        ", ".join(
+                            f"{g}={s:.0f}"
+                            for g, s in sorted(r["scores"].items(), key=lambda x: -x[1])
+                        )
+                        if r["scores"]
+                        else "(none)"
+                    )
                     f.write(f"[{r['num']:04d}] {r['file']}\n")
                     f.write(f"       → {r['genre']} ({r['confidence']}) via {r['source']}\n")
                     f.write(f"       tags:   {tag_str}\n")
@@ -1595,11 +2153,11 @@ def main():
         print("=" * 50)
         for genre in _DISPLAY_ORDER:
             count = counts.get(genre, 0)
-            bar   = "█" * (count // 20) if count else ""
+            bar = "█" * (count // 20) if count else ""
             print(f"  {genre:<15} {count:>5}  {bar}")
 
         low_conf = [r for r in results if r["confidence"] == "low"]
-        misc     = [r for r in results if r["genre"] == "Misc"]
+        misc = [r for r in results if r["genre"] == "Misc"]
         print(f"\n  Low confidence: {len(low_conf)}")
         print(f"  Misc (review):  {len(misc)}")
         if results and not args.dry_run:
@@ -1616,45 +2174,46 @@ def main():
         if args.dry_run:
             print(f"  Would fetch: {fetched}, already have: {skipped}, no match: {no_match}")
         else:
-            print(f"  Fetched: {fetched}, already have: {skipped}, no match: {no_match}, errors: {errors}")
+            print(
+                f"  Fetched: {fetched}, already have: {skipped}, no match: {no_match}, errors: {errors}"
+            )
         print()
         if _stopping:
             sys.exit(130)
 
-    # Step 6: Linux sorts into genre folders; macOS sends completed files to Music.
+    # Step 6: no implicit move/import. A verified library plan owns placement.
     if not args.skip_sort:
-        if sys.platform == "darwin":
-            print("── Import to Apple Music " + "─" * 25)
-            moved, skipped, import_errors = import_to_apple_music(files, dry_run=args.dry_run)
-            if args.dry_run:
-                print("  (dry run — no files moved)")
-            else:
-                print(f"  Moved to Apple Music auto-import: {moved}")
-                if skipped:
-                    print(f"  Already in auto-import folder: {skipped}")
-                for err in import_errors:
-                    print(f"  {err}")
-        else:
-            print("── Sort Files " + "─" * 36)
-            if not file_genres:
-                print("  Sort skipped (no tagging results)\n")
-            else:
-                moved, skipped, sort_errors = sort_files(file_genres, dry_run=args.dry_run)
-                if args.dry_run:
-                    print("  (dry run — no files moved)")
-                else:
-                    for genre in _DISPLAY_ORDER:
-                        c = moved.get(genre, 0)
-                        if c:
-                            print(f"  {genre:<15} {c:>5} moved")
-                    for key in sorted(moved):
-                        if key not in PRIORITY and key != "Misc":
-                            print(f"  {key:<30} {moved[key]:>5} moved")
-                    if skipped:
-                        print(f"  Already in correct folder: {skipped}")
-                    for err in sort_errors:
-                        print(f"  {err}")
+        print("── Safe Staging Handoff " + "─" * 27)
+        finish_in_staging(files, dry_run=args.dry_run)
+
+
+def main(argv=None):
+    """Dispatch public commands consistently for direct and installed usage."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "doctor":
+        from pipeline_doctor import main as doctor_main
+
+        return doctor_main(argv[1:])
+    if argv and argv[0] == "intake":
+        from pipeline_intake import main as intake_main
+
+        return intake_main(argv[1:])
+    if argv and argv[0] == "fetch":
+        if len(argv) < 2:
+            print("Error: `download fetch` requires `playlist` or a YouTube URL.")
+            return 2
+        return legacy_main(argv[1:])
+    if argv and argv[0] in {"enrich", "review", "plan", "playlists", "import-bundle"}:
+        from pipeline_workflow import main as workflow_main
+
+        return workflow_main(argv)
+    # Migration commands are isolated from the legacy download pipeline.
+    if argv and argv[0] == "library":
+        from library_safety import main as library_main
+
+        return library_main(argv[1:])
+    return legacy_main(argv)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

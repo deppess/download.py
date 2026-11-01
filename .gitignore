@@ -13,3 +13,7 @@ GEMINI.md
 .DS_Store
 .env
 .env.*
+
+# Local reports and notes
+reports/
+research_notes/
