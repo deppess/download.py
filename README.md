@@ -2,6 +2,8 @@
 
 YouTube music sync pipeline for Linux — downloads with yt-dlp, crops cover art, cleans filenames, tags genres with Last.fm, fetches synced LRCLIB lyrics, and sorts `.m4a` files into genre folders.
 
+Source: [Codeberg](https://codeberg.org/deppes/download.py) (primary) · [GitHub](https://github.com/deppess/download.py) (mirror)
+
 ## Dependencies
 
 ```bash
@@ -110,4 +112,4 @@ If YouTube bot detection triggers, the preflight prints actionable fix options i
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
