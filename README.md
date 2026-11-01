@@ -142,4 +142,4 @@ For a clean rebuild, use Apple's supported library chooser: quit Music, hold Opt
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+All rights reserved. Published for viewing only: no copying, use, modification, distribution or sale without written permission. See [LICENSE](LICENSE).
