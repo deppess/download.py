@@ -110,6 +110,15 @@ Collection overrides route matching filenames into fixed soundtrack folders, suc
 
 If YouTube bot detection triggers, the preflight prints actionable fix options including PO token setup. A token can be supplied via `--po-token` or `po_token` in the config; without one, Chromium cookies alone are the auth layer.
 
+## Build and test
+
+Requires Python 3.11 or later and the packages under Dependencies.
+
+```sh
+python3 -m py_compile download.py
+python3 download.py --help
+```
+
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
