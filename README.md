@@ -2,6 +2,8 @@
 
 YouTube music sync pipeline for Linux and macOS. Downloads with `yt-dlp`, crops cover art, cleans filenames, tags genres with Last.fm, fetches LRCLIB lyrics, and finishes files for the local music library. Linux sorts files into genre folders; macOS imports finished files into Apple Music.
 
+Source: [Codeberg](https://codeberg.org/deppes/download.py) (primary) · [GitHub](https://github.com/deppess/download.py) (mirror)
+
 ## Dependencies
 
 Arch Linux:
@@ -140,4 +142,4 @@ For a clean rebuild, use Apple's supported library chooser: quit Music, hold Opt
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
