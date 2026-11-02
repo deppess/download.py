@@ -11,7 +11,7 @@ class PipelineStateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             db = pipeline_state.connect(Path(directory) / "state.sqlite3")
             self.assertEqual(
-                db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 4
+                db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 5
             )
             self.assertIn(
                 "media_files",
@@ -31,6 +31,7 @@ class PipelineStateTests(unittest.TestCase):
                     "cached_provider_responses": 0,
                     "raw_tracks": 0,
                     "pending_plan_items": 0,
+                    "music_imports": 0,
                 },
             )
 
