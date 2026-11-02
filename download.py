@@ -1,35 +1,13 @@
 #!/opt/local/bin/python3.13
 """
-download.py — Download and safely prepare music files for review.
-
-Pipeline (all processing happens in staging by default):
-  1. Download    yt-dlp → landing/staging dir (requires URL)
-  2. Crop        Center-crop embedded cover art to 1:1
-  3. Clean       Strip 4-digit index and '- Topic' from filenames
-  4. Tag         Last.fm lookup; only high-confidence tags are written
-  5. Lyrics      Fetch lyrics from LRCLIB
-  6. Handoff     Keep files in staging for reviewed, verified placement
+download.py — Download, sort, and import local music safely.
 
 Usage:
-    download playlist                    Sync the hardcoded main playlist
-    download <url>                       Full pipeline for another URL
-    download --process <dir>             Process existing files (no download)
-    download --process <dir> --dry-run   Preview changes
+    download add playlist                Update the configured playlist
+    download add <url>                   Download, sort, and import a URL
+    download doctor                      Check the local setup
 
-    --skip-crop    Skip cover art cropping
-    --skip-tag     Skip genre tagging
-    --skip-lyrics  Skip lyrics fetching
-    --skip-sort    Skip final staging-handoff message
-    --dry-run      Preview all changes without modifying files
-    --verbose      Show Last.fm tag details per file
-    --force        Re-tag files that already have a valid genre
-    --no-cookies   Do not pass Chromium cookies to yt-dlp
-    --po-token     YouTube PO token (VISITOR_DATA+TOKEN); can also be set via
-                   po_token = ... under [youtube] in genre-tagger.cfg
-
-Notes:
-    .downloaded.txt remains yt-dlp's normal success archive.
-    .failed.txt is a separate live skip-list for permanently unavailable YouTube IDs.
+Advanced commands remain available for diagnosis and recovery.
 """
 
 import argparse
@@ -50,6 +28,8 @@ from io import BytesIO
 from pathlib import Path
 
 from music_paths import load_paths
+
+__version__ = "1.0.0"
 
 try:
     import pylast
@@ -83,7 +63,7 @@ LYRICS_DIR = PATHS.lyrics
 ARCHIVE_FILE = PATHS.archive
 FAILED_FILE = PATHS.failed
 CONFIG_FILE = Path.home() / ".config" / "genre-tagger.cfg"
-LOG_DIR = MUSIC_DIR
+LOG_DIR = STATE_DIR
 
 # Main library playlist. Bare `download` intentionally does not use this; run `download playlist`.
 DEFAULT_PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLHxdRPbjKyHsTayiqW6F492cCqI02NbCR"
@@ -1519,6 +1499,7 @@ def download(url, dry_run=False, force_playlist=False, use_cookies=True, po_toke
             notify_full_stop("Download stopped", fatal_seen[:180])
         else:
             print(f"  yt-dlp exited with code {result_code} (some items may have been skipped)")
+    return result_code == 0
 
 
 # ── Cover crop ─────────────────────────────────────────────────────────────
@@ -2190,6 +2171,9 @@ def legacy_main(argv=None):
 def main(argv=None):
     """Dispatch public commands consistently for direct and installed usage."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["--version"]:
+        print(__version__)
+        return 0
     if argv and argv[0] == "doctor":
         from pipeline_doctor import main as doctor_main
 
@@ -2207,6 +2191,14 @@ def main(argv=None):
         from pipeline_workflow import main as workflow_main
 
         return workflow_main(argv)
+    if argv and argv[0] == "music":
+        from music_adapter import main as music_main
+
+        return music_main(argv[1:])
+    if argv and argv[0] == "add":
+        from pipeline_simple import main as simple_main
+
+        return simple_main(argv[1:])
     # Migration commands are isolated from the legacy download pipeline.
     if argv and argv[0] == "library":
         from library_safety import main as library_main
