@@ -55,8 +55,8 @@ def load_paths() -> MusicPaths:
         root=root,
         library=root / "Library",
         landing=root / "download-staging",
-        state=root / ".download-state",
+        state=root / "Library" / ".pipeline",
         lyrics=root / "lyrics",
-        archive=root / ".downloaded.txt",
-        failed=root / ".failed.txt",
+        archive=root / "Library" / ".pipeline" / ".downloaded.txt",
+        failed=root / "Library" / ".pipeline" / ".failed.txt",
     )
