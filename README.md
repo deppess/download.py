@@ -1,9 +1,8 @@
 # download.py
 
-YouTube music pipeline for Linux and macOS. Downloads land in a safe staging
-directory, can be cleaned and enriched, and then enter a separate
-review-first, checksum-verified library-placement workflow. It never moves
-downloads directly into Apple Music's managed-media folder.
+YouTube music pipeline for Linux and macOS. On macOS, one command downloads
+new tracks, sorts them into `~/Music/Library`, and adds them to Music without
+moving files into Music's managed-media folder.
 
 Source: [Codeberg](https://codeberg.org/deppes/download.py) (primary) · [GitHub](https://github.com/deppess/download.py) (mirror)
 
@@ -28,7 +27,7 @@ sudo port install py313-pylast py313-mutagen py313-pillow
 
 macOS notifications use `osascript`. Linux notifications use `notify-send` when available.
 
-## Install
+## Install / update
 
 ```bash
 install -m 755 download.py ~/.local/bin/download
@@ -87,17 +86,25 @@ For Helium cookies on macOS, run once:
 download --setup-helium-cookies
 ```
 
-When migrating an existing library, keep `.downloaded.txt` and `.failed.txt` in `MUSIC_DIR` so yt-dlp skips already synced videos.
+The yt-dlp archive and unavailable-ID list are retained at
+`~/Music/Library/.pipeline/.downloaded.txt` and `.failed.txt`.
 
 ## Commands
 
 ```bash
+download add <url>                 download, sort, and add new tracks to Music
+download add playlist              do the same for the configured playlist
 download fetch playlist            fetch the hardcoded playlist into incoming staging
 download fetch <url>               fetch another YouTube URL into incoming staging
 download intake                    verify and preserve new raw downloads
 download --process <dir> --allow-legacy-mutation
                                    deprecated in-place processor
 ```
+
+For normal use, `download add` is the only command needed. It keeps strong
+matches in the normal genre folders and puts uncertain tracks in
+`~/Music/Library/Review`, then adds all newly published files to Music.
+The remaining commands below are advanced troubleshooting/review controls.
 
 `download playlist` and `download <url>` remain temporary compatibility aliases
 for the `fetch` command. Fetching intentionally stops after download; run
@@ -113,16 +120,17 @@ network, and rate-limit failures receive retry windows; LRCLIB misses are
 cached as bounded negative evidence. Missing or contradictory evidence remains
 in review rather than selecting a genre.
 
-### Future-download workflow
+### Advanced workflow
 
-The normal pipeline deliberately requires review and explicit confirmation:
+These lower-level commands are optional troubleshooting controls. For normal
+use, run `download add <url>` or `download add playlist` instead.
 
 ```bash
 download fetch <url>                         # writes only incoming staging
 download intake                              # checksum-verified raw preservation
 export LASTFM_API_KEY='…'
 download enrich                              # evidence and conservative classification
-download review                              # writes .download-state/reports/raw-review.csv
+download review                              # writes Library/.pipeline/reports/raw-review.csv
 # after reviewing a CSV row, explicitly choose its destination genre:
 download review approve --id <id> --genre Pop --confirm-review
 download plan create                         # writes an immutable pending JSON plan
@@ -131,6 +139,8 @@ download plan approve --plan <plan.json> --confirm-approve
 download plan publish --plan <plan.json> --confirm-publish
 download playlists                           # atomically refreshes five genre M3U8 files
 download import-bundle --plan <plan.json>    # verified bundle for manual Music import
+download music import --plan <plan.json> --confirm-music-import
+                                             # add published tracks directly to Music
 ```
 
 Plans reject changed raw sources, duplicate checksums, stale approvals, unsafe
@@ -138,6 +148,12 @@ paths, and existing destination files. Publication copies from preserved raw
 media only, verifies checksums and readability, and never removes or
 overwrites a file. The import bundle does not launch Apple Music or edit its
 database; import it manually with Music configured not to copy media files.
+
+`download music import` uses macOS Music's AppleScript `add` command rather
+than modifying Music's database. It imports only checksum-verified files from
+a plan already published to `~/Music/Library`, records Music's returned
+persistent ID, and stops if Music reports a location different from the source
+file. It never deletes or retries an uncertain import automatically.
 
 Useful flags:
 
@@ -193,7 +209,7 @@ ambiguous genre evidence, and every filename collision remain in `Review`.
 # Requires the existing [lastfm] api_key. This is network-only and resumable.
 download library rebuild evidence
 
-# Writes timestamped JSONL plan + CSV review queue under ~/.download-state.
+# Writes timestamped JSONL plan + CSV review queue under Library/.pipeline.
 download library rebuild plan
 ```
 
@@ -203,7 +219,7 @@ acknowledgement:
 
 ```bash
 download library rebuild stage \
-  --plan ~/.download-state/rebuild-reports/TIMESTAMP/copy-plan.jsonl \
+  --plan ~/Music/Library/.pipeline/rebuild-reports/TIMESTAMP/copy-plan.jsonl \
   --confirm-stage-copy
 ```
 
@@ -216,7 +232,7 @@ and reconcile it without copying anything again:
 
 ```bash
 download library rebuild reconcile \
-  --plan ~/.download-state/rebuild-reports/TIMESTAMP/copy-plan.jsonl
+  --plan ~/Music/Library/.pipeline/rebuild-reports/TIMESTAMP/copy-plan.jsonl
 ```
 
 After reconciliation, create portable genre playlists for the tracks with
@@ -225,7 +241,7 @@ Music library after importing the corresponding staged tracks:
 
 ```bash
 download library rebuild playlists \
-  --plan ~/.download-state/rebuild-reports/TIMESTAMP/copy-plan.jsonl
+  --plan ~/Music/Library/.pipeline/rebuild-reports/TIMESTAMP/copy-plan.jsonl
 ```
 
 To rename the verified staged folder before importing, use the guarded
@@ -239,33 +255,30 @@ download library rebuild relocate \
 
 Bare `download` intentionally fails instead of syncing the playlist by accident.
 
-## Pipeline
+## Legacy compatibility
 
 ```text
-All platforms:
-yt-dlp -> download-staging/
-  crop embedded cover art to 1:1
-  strip playlist index prefix + "- Topic" from filenames
-  Last.fm lookup -> write only high-confidence genre metadata
-  LRCLIB lookup -> save synced `.lrc` files
-  keep files in staging for a reviewed and verified library plan
+The original direct-processing flags remain available behind
+`--allow-legacy-mutation`. They are not part of the normal workflow.
 ```
 
-Genre buckets: `Hip Hop`, `Rock & Metal`, `Soul`, `Electronic`, `Oldies`, `Misc`.
+New tracks use `Electronic`, `Hip Hop`, `Pop`, `Rock & Metal`, `Soul`, or
+`Review` when evidence is uncertain.
 
 ## macOS Apple Music
 
-Import only verified files from `~/Music/Library` using Music's **File → Add
-to Library**. Turn off Music's “Copy files to Media folder when adding to
-library” setting to preserve the verified physical layout. Apple Music import
-is intentionally never an automatic side effect of downloading.
+`download add` imports newly published verified files from `~/Music/Library`
+using Music's AppleScript interface. Turn off Music's “Copy files to Media
+folder when adding to library” setting to preserve the verified physical layout.
 
 ## State Files
 
 ```text
-.downloaded.txt  yt-dlp success archive
-.failed.txt      permanent unavailable-video log
-.download-log.*  latest Last.fm tagging log
+~/Music/Library/.pipeline/.downloaded.txt   yt-dlp success archive
+~/Music/Library/.pipeline/.failed.txt       permanent unavailable-video log
+~/Music/Library/.pipeline/.download-log.*   legacy tagging log
+~/Music/Library/.pipeline/pipeline.sqlite3  active pipeline state
+~/Music/Library/.sorted-library-manifest.jsonl  verified library manifest
 ```
 
 `.failed.txt` IDs are also written into `.downloaded.txt` so yt-dlp skips permanently unavailable videos on future runs.
