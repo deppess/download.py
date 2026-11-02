@@ -32,12 +32,13 @@ from library_safety import (
     verify_manifest,
 )
 from music_taxonomy import classify_tag_evidence
+from music_paths import load_paths
 
-STATE = Path.home() / "Music" / ".download-state" / "rebuild-evidence.sqlite3"
-REPORTS = Path.home() / "Music" / ".download-state" / "rebuild-reports"
+STATE = load_paths().state / "rebuild-evidence.sqlite3"
+REPORTS = load_paths().state / "rebuild-reports"
 CONFIG = Path.home() / ".config" / "genre-tagger.cfg"
 SORTED_LIBRARY = Path.home() / "Music" / "Sorted-Library"
-SORTED_MANIFEST = "sorted-library-manifest.jsonl"
+SORTED_MANIFEST = ".sorted-library-manifest.jsonl"
 
 
 def _connect(state: Path) -> sqlite3.Connection:
