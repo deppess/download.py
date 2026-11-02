@@ -17,6 +17,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from music_paths import load_paths
+
 try:
     from mutagen.mp4 import MP4
 except ImportError:  # pragma: no cover - the main program reports dependencies
@@ -280,6 +282,7 @@ def _print_audit(records: list[dict]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    paths = load_paths()
     # Kept separate from backup operations: rebuild planning has no access to
     # copy/move/delete functions and only creates state/report files.
     if argv and argv[0] == "rebuild":
@@ -305,19 +308,15 @@ def main(argv: list[str] | None = None) -> int:
     adopt_parser = subparsers.add_parser(
         "adopt", help="Validate and register an existing finished library; never changes media."
     )
-    adopt_parser.add_argument("--source", type=Path, default=Path.home() / "Music" / "Library")
+    adopt_parser.add_argument("--source", type=Path, default=paths.library)
     adopt_parser.add_argument(
         "--manifest",
         type=Path,
-        default=Path.home() / "Music" / "Library" / "sorted-library-manifest.jsonl",
+        default=paths.library / ".sorted-library-manifest.jsonl",
     )
-    adopt_parser.add_argument(
-        "--state", type=Path, default=Path.home() / "Music" / ".download-state" / "pipeline.sqlite3"
-    )
+    adopt_parser.add_argument("--state", type=Path, default=paths.state / "pipeline.sqlite3")
     status_parser = subparsers.add_parser("status", help="Read-only summary of pipeline state.")
-    status_parser.add_argument(
-        "--state", type=Path, default=Path.home() / "Music" / ".download-state" / "pipeline.sqlite3"
-    )
+    status_parser.add_argument("--state", type=Path, default=paths.state / "pipeline.sqlite3")
     cache_parser = subparsers.add_parser(
         "migrate-lastfm-cache",
         help="Copy legacy Last.fm evidence into shared state; no network or media changes.",
@@ -325,11 +324,9 @@ def main(argv: list[str] | None = None) -> int:
     cache_parser.add_argument(
         "--source",
         type=Path,
-        default=Path.home() / "Music" / ".download-state" / "rebuild-evidence.sqlite3",
+        default=paths.state / "rebuild-evidence.sqlite3",
     )
-    cache_parser.add_argument(
-        "--state", type=Path, default=Path.home() / "Music" / ".download-state" / "pipeline.sqlite3"
-    )
+    cache_parser.add_argument("--state", type=Path, default=paths.state / "pipeline.sqlite3")
     args = parser.parse_args(argv)
     try:
         if args.command == "audit":
