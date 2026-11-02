@@ -12,7 +12,7 @@ from pathlib import Path
 from library_safety import SafetyError, load_manifest, verify_manifest
 from music_paths import load_paths
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_now() -> str:
@@ -151,6 +151,26 @@ def migrate(db: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (4, utc_now())
         )
         db.commit()
+    if 5 not in applied:
+        db.executescript(
+            """
+            CREATE TABLE music_imports (
+                id INTEGER PRIMARY KEY,
+                plan_item_id INTEGER NOT NULL UNIQUE REFERENCES plan_items(id),
+                persistent_id TEXT,
+                reported_location TEXT,
+                status TEXT NOT NULL CHECK(status IN ('intent', 'verified', 'location_mismatch', 'uncertain', 'failed')),
+                error TEXT,
+                created_at TEXT NOT NULL,
+                verified_at TEXT
+            );
+            CREATE INDEX music_imports_status_idx ON music_imports(status);
+            """
+        )
+        db.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)", (5, utc_now())
+        )
+        db.commit()
 
 
 def upsert_source(
@@ -259,6 +279,9 @@ def state_summary(state_file: Path | None = None) -> dict[str, int]:
             ).fetchone()[0],
             "pending_plan_items": db.execute(
                 "SELECT COUNT(*) FROM plan_items WHERE status IN ('pending', 'approved')"
+            ).fetchone()[0],
+            "music_imports": db.execute(
+                "SELECT COUNT(*) FROM music_imports WHERE status='verified'"
             ).fetchone()[0],
         }
     finally:
