@@ -1,8 +1,8 @@
 # Isolated, read-only beets catalog for the library rebuild.
 # This file must never use the user's global beets configuration or database.
-library: ~/Music/.download-state/beets-rebuild.db
-directory: ~/Music/Sorted-Library
-statefile: ~/Music/.download-state/beets-rebuild.state
+library: ~/Music/Library/.pipeline/beets-rebuild.db
+directory: ~/Music/Library
+statefile: ~/Music/Library/.pipeline/beets-rebuild.state
 
 plugins: musicbrainz
 
@@ -17,7 +17,7 @@ import:
   quiet_fallback: skip
   none_rec_action: skip
   duplicate_action: skip
-  log: ~/Music/.download-state/beets-rebuild-import.log
+  log: ~/Music/Library/.pipeline/beets-rebuild-import.log
   # Candidate metadata is stored only in this private database. Source and
   # backup files remain read-only because write/copy/move/delete are all off.
   autotag: yes
