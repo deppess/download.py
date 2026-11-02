@@ -12,4 +12,4 @@ class MusicPathsTests(unittest.TestCase):
         self.assertEqual(str(paths.root), "/tmp/music-root")
         self.assertEqual(str(paths.library), "/tmp/music-root/Library")
         self.assertEqual(str(paths.landing), "/tmp/music-root/download-staging")
-        self.assertEqual(str(paths.state), "/tmp/music-root/.download-state")
+        self.assertEqual(str(paths.state), "/tmp/music-root/Library/.pipeline")
