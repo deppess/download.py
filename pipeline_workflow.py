@@ -51,7 +51,11 @@ def _source_artist(raw: Path) -> tuple[str, str]:
 
 
 def enrich(
-    state_file: Path, landing: Path, refresh: bool = False, with_lyrics: bool = False
+    state_file: Path,
+    landing: Path,
+    refresh: bool = False,
+    with_lyrics: bool = False,
+    lastfm_api_key: str | None = None,
 ) -> dict[str, int]:
     """Read raw media metadata and cache evidence; no media is modified."""
     db = connect(state_file)
@@ -59,7 +63,7 @@ def enrich(
     try:
         rows = db.execute("SELECT * FROM media_files WHERE role='raw' ORDER BY id").fetchall()
         try:
-            lastfm = LastFMClient(db)
+            lastfm = LastFMClient(db, api_key=lastfm_api_key)
         except ProviderConfigurationError:
             lastfm = None
         lyrics = LRCLIBClient(db) if with_lyrics else None
